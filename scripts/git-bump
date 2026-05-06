@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# git bump <major|minor|patch|<exact-version>>
+#
+# Bumps [project].version in pyproject.toml (via `uv version --bump` for kind args, or
+# `uv version <X>` for an explicit version), git-adds pyproject.toml (and uv.lock if uv
+# updated it), commits with message "release v<new>". Does NOT tag — use `git release`.
+#
+# Convention: ParkviewLab Python projects keep the version in pyproject.toml as the single
+# source of truth. `git bump` is the only sanctioned way to change it during a release flow.
+#
+# Companion: `git release` (in this same dev-tools repo) reads pyproject and tags v<version>.
+# Typical flow:
+#   git bump patch    # 0.1.5 → 0.1.6, committed
+#   git release       # tag v0.1.6
+#   git push --follow-tags
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: git bump <major|minor|patch|<exact-version>>" >&2
+  exit 1
+fi
+
+if [[ ! -f pyproject.toml ]]; then
+  echo "git bump: no pyproject.toml in $(pwd)" >&2
+  exit 1
+fi
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "git bump: working tree is dirty; commit or stash before bumping" >&2
+  exit 1
+fi
+
+read_version() {
+  uv run --quiet python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])'
+}
+
+old="$(read_version)"
+
+case "$1" in
+  major|minor|patch)
+    uv version --bump "$1" >/dev/null
+    ;;
+  *)
+    # Treat any other argument as an explicit version string.
+    uv version "$1" >/dev/null
+    ;;
+esac
+
+new="$(read_version)"
+
+if [[ "$old" == "$new" ]]; then
+  echo "git bump: version did not change ($old)" >&2
+  exit 1
+fi
+
+git add pyproject.toml
+# uv may also touch uv.lock when version changes; pick it up if so.
+if [[ -n "$(git status --porcelain uv.lock 2>/dev/null)" ]]; then
+  git add uv.lock
+fi
+
+git commit -m "release v$new" >/dev/null
+
+echo "bumped $old → $new and committed"
+echo "next: git release && git push --follow-tags"
