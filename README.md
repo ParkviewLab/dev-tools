@@ -55,15 +55,41 @@ git release
 git push --follow-tags
 ```
 
+## Release flow
+
+Every ParkviewLab Python project follows the same flow ("Flow B"). The bump and tag both happen on `main`; CI gates publish on the tag being reachable from `origin/main`.
+
+```
+work on claude → merge claude → develop → merge develop → main
+on main:
+  git bump <patch|minor|major>     # creates "release v<new>" commit on main
+  git release                       # annotated tag v<new>
+  git push --follow-tags            # CI fires
+back-merge:
+  git -C ../develop merge main && git -C ../develop push
+```
+
+**Why bump+tag on main (not on `claude`):** clean feature-branch history; the bump is a deliberate "I'm shipping" act on main; the tag is trivially reachable from `origin/main` (the CI gate passes by construction); the bump commit never travels through merge conflicts.
+
+**Why back-merge `main → develop` after release:** without it, develop's `pyproject.toml` lags main's, and the next `develop → main` promotion has a needless conflict on the version line every. single. time. The back-merge is two commands; do it immediately after pushing the tag.
+
+**The CI gate** (in each repo's `.github/workflows/release.yml`) runs two checks before either publish job:
+
+1. Tag matches `[project].version` in `pyproject.toml`.
+2. Tagged commit is reachable from `origin/main`.
+
+Both `docker` and `pypi` jobs `needs: gate`, so a failure prevents *any* artifact from shipping — no half-shipped state.
+
 ## Conventions enforced
 
-These tools encode three patterns shared across every Python repo in ParkviewLab:
+These tools encode four patterns shared across every Python repo in ParkviewLab:
 
 1. **`pyproject.toml` is the single source of truth for version.** Nothing else hard-codes or duplicates it.
 2. **Tags are derived from pyproject; never typed.** `git release` enforces this.
-3. **Release CI verifies the tag matches pyproject before publishing.** A defense-in-depth check; the tag wouldn't disagree if you used `git release`, but the check catches manual-tag mistakes.
+3. **Releases come from `main`.** `git bump` + `git release` happen on the `main` worktree; `claude` and `develop` aren't release surfaces.
+4. **Release CI gates publish on both invariants.** Tag-vs-pyproject mismatch *or* tag not reachable from `origin/main` → no artifact ships.
 
-Together, you can't accidentally ship a tag that disagrees with the wheel.
+Together, you can't accidentally ship a tag that disagrees with the wheel, or ship from a branch that hasn't been promoted to `main`.
 
 ## Adding a new tool
 
