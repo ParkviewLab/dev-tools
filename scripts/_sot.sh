@@ -91,15 +91,20 @@ sot_dev_n() {  # echoes the .devN / -devN number in $1, or -1 if none
 
 # sot_dev_version <current> <major|minor|patch> -> the next dev version toward that target
 sot_dev_version() {
-  local cur="$1" kind="$2" target n
+  local cur="$1" kind="$2" target n sep k
+  k="$(sot_kind)"
   target="$(sot_compute_next "$cur" "$kind")"
-  if [[ "$(sot_kind)" == version-txt ]]; then
+  if [[ "$k" == version-txt ]]; then
     echo "${target}-dev"; return            # docs repos publish nothing -> no counter needed
   fi
+  # Pre-release separator is SoT-specific: PEP-440 '.devN' for pyproject (PyPI),
+  # but semver '-devN' for package (npm / electron-builder reject '.devN').
+  # Either form is read back by sot_dev_n / sot_strip_dev.
+  if [[ "$k" == pyproject ]]; then sep=".dev"; else sep="-dev"; fi
   n="$(sot_dev_n "$cur")"
   if [[ "$(sot_strip_dev "$cur")" == "$target" && "$n" -ge 0 ]]; then
-    echo "${target}.dev$((n+1))"            # next build toward the same target
+    echo "${target}${sep}$((n+1))"          # next build toward the same target
   else
-    echo "${target}.dev0"                   # first build toward a (new) target
+    echo "${target}${sep}0"                 # first build toward a (new) target
   fi
 }
