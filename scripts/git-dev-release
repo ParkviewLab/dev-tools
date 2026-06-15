@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# git dev-release [--open] [--dry-run] [<major|minor|patch>]
+#
+# On-demand DEVELOPMENT build, run from `develop`. Bumps the source of truth to the
+# next dev version of the chosen target, commits, pushes develop, and dispatches the
+# repo's dev-release.yml workflow (which publishes a GHCR `:dev` image + the
+# X.Y.Z.devN to TestPyPI). For the real release, use `git bump` / `git release`.
+#
+#   git dev-release patch      # next dev build heading toward the next patch
+#   git dev-release minor      # ...toward the next minor (re-points the cycle)
+#   git dev-release --open     # open the next cycle post-release: X.Y.(Z+1).dev0, no publish
+#   git dev-release --dry-run patch
+#
+# See the handbook's releases.md ("Development versioning") + ci.md (dev-release.yml).
+
+set -euo pipefail
+
+# Resolve our real directory (through the install.sh symlink) to source _sot.sh.
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+source "$(cd -P "$(dirname "$_src")" && pwd)/_sot.sh"
+
+DRY=0; OPEN=0; KIND=""
+for a in "$@"; do
+  case "$a" in
+    --dry-run)         DRY=1 ;;
+    --open)            OPEN=1 ;;
+    major|minor|patch) KIND="$a" ;;
+    *) echo "git dev-release: unknown arg '$a'" >&2
+       echo "usage: git dev-release [--open] [--dry-run] [<major|minor|patch>]" >&2; exit 1 ;;
+  esac
+done
+
+sot_kind >/dev/null
+
+branch="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$branch" != "develop" ]]; then
+  echo "git dev-release: run from develop (on '$branch')" >&2
+  exit 1
+fi
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "git dev-release: working tree is dirty; commit or stash first" >&2
+  exit 1
+fi
+
+cur="$(sot_read)"
+
+if [[ "$OPEN" == 1 ]]; then
+  new="$(sot_dev_version "$cur" patch)"      # next-patch placeholder
+  msg="chore: open $new dev cycle"
+else
+  if [[ -z "$KIND" ]]; then
+    echo "git dev-release: which target is this dev build heading toward?" >&2
+    echo "  re-run with a kind:  git dev-release patch|minor|major" >&2
+    echo "  (patch keeps the current target; minor/major re-point the cycle)" >&2
+    exit 2
+  fi
+  new="$(sot_dev_version "$cur" "$KIND")"
+  msg="chore: dev build v$new"
+fi
+
+echo "current: $cur"
+echo "new:     $new"
+
+if [[ "$DRY" == 1 ]]; then
+  if [[ "$OPEN" == 1 ]]; then
+    echo "(dry run) would set SoT -> $new, commit \"$msg\", push develop (no publish)"
+  else
+    echo "(dry run) would set SoT -> $new, commit \"$msg\", push develop, dispatch dev-release.yml"
+  fi
+  exit 0
+fi
+
+# shellcheck disable=SC2046  # intentional word-split: sot_write may echo two files
+git add $(sot_write "$new")
+git commit -m "$msg" >/dev/null
+git push origin develop
+
+if [[ "$OPEN" == 1 ]]; then
+  echo "opened dev cycle at $new (pushed develop). No publish."
+elif [[ "$(sot_kind)" == version-txt ]]; then
+  echo "set dev version $new (pushed develop). VERSION.txt repo — no dev artifact to publish."
+else
+  if gh workflow run dev-release.yml --ref develop; then
+    echo "dev build $new pushed; dispatched dev-release.yml on develop."
+  else
+    echo "dev build $new pushed, but couldn't dispatch dev-release.yml — is it on develop?" >&2
+  fi
+fi
