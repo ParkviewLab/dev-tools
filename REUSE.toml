@@ -1,0 +1,18 @@
+version = 1
+
+SPDX-PackageName = "dev-tools"
+SPDX-PackageSupplier = "Gary Frattarola <garyf@parkviewlab.ai>"
+
+# Docs + repo meta → CC-BY-4.0
+[[annotations]]
+path = ["README.md", "LICENSING.md", "AGENTS.md", "CLAUDE.md", "VERSION.txt", "REUSE.toml", ".gitignore"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Gary Frattarola <garyf@parkviewlab.ai>"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+# Scripts + installer + CI (code/config) → AGPL-3.0-or-later
+[[annotations]]
+path = ["scripts/**", "install.sh", ".github/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Gary Frattarola <garyf@parkviewlab.ai>"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

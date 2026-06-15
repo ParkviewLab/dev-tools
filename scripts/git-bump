@@ -1,66 +1,56 @@
 #!/usr/bin/env bash
-# git bump <major|minor|patch|<exact-version>>
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Bumps [project].version in pyproject.toml (via `uv version --bump` for kind args, or
-# `uv version <X>` for an explicit version), git-adds pyproject.toml (and uv.lock if uv
-# updated it), commits with message "release v<new>". Does NOT tag — use `git release`.
+# git bump <major|minor|patch|release|<exact-version>>
 #
-# Convention: ParkviewLab Python projects keep the version in pyproject.toml as the single
-# source of truth. `git bump` is the only sanctioned way to change it during a release flow.
+# Bumps the version in the repo's source of truth — pyproject.toml, package.json, or
+# VERSION.txt (auto-detected) — git-adds it (+ lockfile if touched), and commits
+# "release v<new>". Does NOT tag — that's `git release`'s job.
 #
-# Companion: `git release` (in this same dev-tools repo) reads pyproject and tags v<version>.
-# Typical flow:
-#   git bump patch    # 0.1.5 → 0.1.6, committed
-#   git release       # tag v0.1.6
-#   git push --follow-tags
+#   git bump patch     # 0.1.5 -> 0.1.6
+#   git bump minor     # 0.1.6 -> 0.2.0
+#   git bump major     # 0.2.0 -> 1.0.0
+#   git bump release   # finalize a dev cycle: 0.2.0.dev1 -> 0.2.0
+#   git bump 0.1.7     # explicit version
+#
+# From a dev version (e.g. 0.2.0.dev0, the open-cycle placeholder), <kind> re-points
+# off the last release tag and finalizes: patch -> 0.2.0, minor -> 0.3.0, major ->
+# 1.0.0. See the handbook's releases.md ("Development versioning").
 
 set -euo pipefail
 
+# Resolve our real directory (through the install.sh symlink) to source _sot.sh.
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+source "$(cd -P "$(dirname "$_src")" && pwd)/_sot.sh"
+
 if [[ $# -ne 1 ]]; then
-  echo "usage: git bump <major|minor|patch|<exact-version>>" >&2
+  echo "usage: git bump <major|minor|patch|release|<exact-version>>" >&2
   exit 1
 fi
 
-if [[ ! -f pyproject.toml ]]; then
-  echo "git bump: no pyproject.toml in $(pwd)" >&2
-  exit 1
-fi
+sot_kind >/dev/null   # errors out if there's no source of truth
 
 if [[ -n "$(git status --porcelain)" ]]; then
   echo "git bump: working tree is dirty; commit or stash before bumping" >&2
   exit 1
 fi
 
-read_version() {
-  uv run --quiet python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])'
-}
-
-old="$(read_version)"
-
-case "$1" in
-  major|minor|patch)
-    uv version --bump "$1" >/dev/null
-    ;;
-  *)
-    # Treat any other argument as an explicit version string.
-    uv version "$1" >/dev/null
-    ;;
-esac
-
-new="$(read_version)"
+old="$(sot_read)"
+new="$(sot_compute_next "$old" "$1")"
 
 if [[ "$old" == "$new" ]]; then
   echo "git bump: version did not change ($old)" >&2
   exit 1
 fi
 
-git add pyproject.toml
-# uv may also touch uv.lock when version changes; pick it up if so.
-if [[ -n "$(git status --porcelain uv.lock 2>/dev/null)" ]]; then
-  git add uv.lock
-fi
-
+# shellcheck disable=SC2046  # intentional word-split: sot_write may echo two files
+git add $(sot_write "$new")
 git commit -m "release v$new" >/dev/null
 
-echo "bumped $old → $new and committed"
+echo "bumped $old -> $new and committed"
 echo "next: git release && git push --follow-tags"

@@ -1,39 +1,40 @@
 #!/usr/bin/env bash
-# git release — read [project].version from ./pyproject.toml and create an annotated tag v<version>.
-# Does NOT push; tells you the command to push.
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Convention: ParkviewLab Python projects use pyproject.toml as the single source of truth for
-# version. The release CI verifies that the pushed tag matches pyproject. This script keeps the
-# tag-side of that contract honest by deriving the tag from pyproject — never typed by hand.
+# git release — read the version from the repo's source of truth (pyproject.toml /
+# package.json / VERSION.txt, auto-detected) and create an annotated tag v<version>
+# on HEAD. Refuses on a dirty tree or an existing tag. Does NOT push.
 #
-# Companion: `git bump` (in this same dev-tools repo) bumps pyproject + commits. Typical flow:
-#   git bump patch    # bump pyproject + commit
-#   git release       # tag derived from pyproject
-#   git push --follow-tags
+#   git release            # tag v<version>; then: git push --follow-tags
+#
+# The release CI verifies the pushed tag matches the source of truth; this keeps the
+# tag-side honest by deriving it — never typed by hand. Companion: `git bump`.
 
 set -euo pipefail
 
-if [[ ! -f pyproject.toml ]]; then
-  echo "git release: no pyproject.toml in $(pwd)" >&2
-  exit 1
-fi
+# Resolve our real directory (through the install.sh symlink) to source _sot.sh.
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+source "$(cd -P "$(dirname "$_src")" && pwd)/_sot.sh"
 
-# Read [project].version from pyproject.toml. tomllib is stdlib in 3.11+.
-v=$(uv run --quiet python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+sot_kind >/dev/null   # errors out if there's no source of truth
 
+v="$(sot_read)"
 if [[ -z "$v" ]]; then
-  echo "git release: could not read [project].version from pyproject.toml" >&2
+  echo "git release: could not read the version from the source of truth" >&2
   exit 1
 fi
 
 tag="v$v"
-
 if git rev-parse "$tag" >/dev/null 2>&1; then
   echo "git release: tag $tag already exists" >&2
   exit 1
 fi
 
-# Refuse on a dirty worktree — release tags should point at clean state.
 if [[ -n "$(git status --porcelain)" ]]; then
   echo "git release: working tree is dirty; commit or stash before tagging" >&2
   exit 1
