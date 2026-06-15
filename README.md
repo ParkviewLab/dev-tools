@@ -12,7 +12,7 @@ cd ~/dev-tools
 ./install.sh
 ```
 
-Updates: `git pull`. Because the installer **symlinks** (not copies), every dev who ran `install.sh` once picks up new/changed scripts on the next `git pull` — no re-run needed.
+Updates: `git pull`. Because the installer **symlinks** (not copies), a changed script is picked up on the next `git pull` with no re-run; a **brand-new** command needs one more `install.sh` run to add its symlink.
 
 ### Requirements
 
@@ -96,6 +96,8 @@ git push --follow-tags        # CI publishes
 # then back-merge main -> develop
 ```
 
+dev-tools is itself a `VERSION.txt` repo and is **released with these very tools** — `VERSION.txt` is the source of truth, bumped by `git bump` and tagged by `git release`. It ships no package, so a release just promotes `develop → main` and tags (no CI publish step).
+
 ## Adding a tool
 
 1. Drop the script (executable, `#!/usr/bin/env bash`) into `scripts/`. Non-executable files (like `_sot.sh`) are *sourced*, not symlinked.
@@ -104,4 +106,7 @@ git push --follow-tags        # CI publishes
 
 ## License
 
-MIT. See `LICENSE`.
+AGPL-3.0-or-later for the tooling (`scripts/**`, `install.sh`, CI); CC-BY-4.0 for the docs & repo meta. See [`LICENSING.md`](LICENSING.md).
+
+---
+<sub>© 2026 Gary Frattarola · Licensed under [CC-BY-4.0](LICENSES/CC-BY-4.0.txt) · part of [ParkviewLab](https://github.com/ParkviewLab)</sub>

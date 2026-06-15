@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
 # git release — read the version from the repo's source of truth (pyproject.toml /
 # package.json / VERSION.txt, auto-detected) and create an annotated tag v<version>
 # on HEAD. Refuses on a dirty tree or an existing tag. Does NOT push.
