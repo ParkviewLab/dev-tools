@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
 # git bump <major|minor|patch|release|<exact-version>>
 #
 # Bumps the version in the repo's source of truth — pyproject.toml, package.json, or

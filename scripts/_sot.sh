@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
 # _sot.sh — version Source-of-Truth helpers for the ParkviewLab git-* release scripts.
 # Sourced (not run) by git-bump, git-release, git-dev-release. NOT executable, so
 # install.sh does not symlink it as a `git-` command.

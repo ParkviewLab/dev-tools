@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
 # git dev-release [--open] [--dry-run] [<major|minor|patch>]
 #
 # On-demand DEVELOPMENT build, run from `develop`. Bumps the source of truth to the
