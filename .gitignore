@@ -1,3 +1,6 @@
 # OS / editor cruft
 .DS_Store
 *.swp
+
+# Python bytecode caches (the tests load scripts/build-pages-site by path)
+__pycache__/
