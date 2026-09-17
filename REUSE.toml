@@ -10,9 +10,9 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Gary Frattarola <garyf@parkviewlab.ai>"
 SPDX-License-Identifier = "CC-BY-4.0"
 
-# Scripts + installer + CI (code/config) → AGPL-3.0-or-later
+# Scripts + tests + installer + CI (code/config) → AGPL-3.0-or-later
 [[annotations]]
-path = ["scripts/**", "install.sh", ".github/**"]
+path = ["scripts/**", "tests/**", "install.sh", ".github/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Gary Frattarola <garyf@parkviewlab.ai>"
 SPDX-License-Identifier = "AGPL-3.0-or-later"

@@ -4,7 +4,7 @@ Shared developer tooling for repos under [`ParkviewLab/`](https://github.com/Par
 
 ## Install
 
-Clone once, run `install.sh`. The installer symlinks every **executable** script in `scripts/` into `~/.local/bin/`, so each is on `$PATH` as `git-<verb>`.
+Clone once, run `install.sh`. The installer symlinks every **executable** script in `scripts/` into `~/.local/bin/`, so each is on `$PATH` under its file name: `git-<verb>` for the version helpers, `build-pages-site` for the site builder.
 
 ```bash
 git clone git@github.com:ParkviewLab/dev-tools.git ~/dev-tools
@@ -17,7 +17,8 @@ Updates: `git pull`. Because the installer **symlinks** (not copies), a changed 
 ### Requirements
 
 - `~/.local/bin` on `$PATH` (default on most modern macOS / Linux setups).
-- Bash 4+ (every script is `#!/usr/bin/env bash`).
+- Bash 4+ for the version helpers (`#!/usr/bin/env bash`).
+- `python3` (3.13) for `build-pages-site`, which uses the standard library only.
 - Per the repo's version source of truth: `uv` for `pyproject.toml`, `node`/`npm` for `package.json`, nothing extra for `VERSION.txt`.
 - `gh` (GitHub CLI) for `git dev-release`.
 
@@ -84,6 +85,77 @@ git dev-release --dry-run patch
 
 The full convention — when to open a cycle, how it interacts with `version-guard` and the release gate — is the **[handbook's `releases.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md) ("Development versioning")** + `ci.md` (`dev-release.yml`). dev-tools is the *tooling*; the handbook is the source of truth for the *flow*.
 
+## `build-pages-site` — build a repo's documentation site
+
+`build-pages-site` assembles the GitHub Pages site of a repo that publishes its `docs/` (the handbook's [`docs-site.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/docs-site.md)). It is the one implementation every publishing repo uses: the mechanics live here, and only the page shell (the styling and the introduction) stays per-repo.
+
+It reads `docs/` and `site/` at the repo root and nothing else, and writes into `--out`:
+
+| Path | What |
+|---|---|
+| `index.html` | generated: the page shell around the introduction (`site/intro.html`) and a list of every document in `docs/` |
+| `<page>/` | every other file under `site/`, copied as it is, with the release tag stamped into each `.html` in place of `__LATEST_TAG__` |
+| `docs/` | `docs/`, byte-identical to the repo, plus a generated `index.html` in every subfolder that holds documents (a folder that ships its own `index.html` keeps it) |
+
+`site/` is optional, as is the introduction: a repo with neither publishes its `docs/` alone. pensa-grex's download page, `site/downloads/index.html`, is ordinary `site/` content, stamped like any other `.html` under `site/`. The documents are listed in five groups, in order: the northstar (`northstar.html`, else `northstar.md`), the other HTML documents, the Markdown specifications and notes, the ideas under consideration (`in-flight_ideas.md` and `*_ideas.md`), and `CONTRIBUTING.md`; within a group, by title. A Markdown document with an `.html` twin is listed once, under the twin, with a "Markdown source" link. An HTML document's title is its `<title>`, and its description its `<meta name="description">` when present; a Markdown document's title is its first `# ` heading; a document without a title fails the build. HTML documents are linked relatively; Markdown documents open in GitHub's rendered view, pinned to the release tag.
+
+```bash
+build-pages-site --out DIR [--tag vX.Y.Z] [--shell FILE] [--repo DIR]
+```
+
+- `--out DIR` (required): the directory to assemble into, new or empty. A non-empty directory, or one inside `docs/` or `site/`, is refused.
+- `--tag vX.Y.Z`: the release to pin to, for a local run; by default the newest `v*` tag reachable from `HEAD` (`git describe --tags --abbrev=0 --match 'v[0-9]*'`). Either way it must be a `vX.Y.Z` release tag; a `vnext` is refused.
+- `--shell FILE`: the page shell (below); by default a built-in shell in the ParkviewLab brand. A shell under `docs/` is refused, since it would be published as a document.
+- `--repo DIR`: the repo to build; by default the current directory, which is where the pages workflow runs. It must be the root of its git checkout when it is inside one, so a subdirectory never borrows the enclosing checkout's remote. A checkout of dev-tools in a subfolder of that repo is not read.
+
+The repo's GitHub address, for the pinned links, is read from the `origin` remote, else from `GITHUB_REPOSITORY`.
+
+### The shell
+
+The root index and every folder index are one HTML file, the shell, with these placeholders substituted:
+
+| Placeholder | Value |
+|---|---|
+| `{{title}}` | the page title: the repo name on the root page, `<repo> · docs/<folder>` on a folder index |
+| `{{intro}}` | `site/intro.html` without its leading comments, on the root page; empty on a folder index, and when there is no intro |
+| `{{groups}}` | the document list: the five groups and, where the folder has subfolders holding documents, a "Folders" group (the one required placeholder) |
+| `{{root}}` | the relative path from the page's folder to the site root: empty on the root page, `../../` in `docs/<folder>/` |
+| `{{tag}}` | the release tag |
+| `{{repo}}` | the repo name |
+| `{{footer}}` | two `<span>`s: the release the site is published from, linked to its tree on GitHub, and a link to the repo |
+
+A placeholder that starts its line is indented to that line's column, every line of a multi-line value with it, so the output follows the shell's own layout. A placeholder is written exactly as listed; any other `{{name}}`, a different case or spacing included, fails the build. A shell, and `site/intro.html`, may also carry `__LATEST_TAG__`, which the build substitutes as it does in a hand-built page. The generated list is a `<div class="group <key>">` per group (`northstar`, `html`, `specs`, `ideas`, `contributing`, `folders`), each holding an `<h3>` and a `<ul class="doclist">` of `<li class="doc">` cards with a `.doc-title` link and, when there is one, a `.doc-desc` paragraph and a `.doc-meta` line; a shell styles those classes. A shell kept under `site/` (say `site/shell.html`) is not published.
+
+The built-in shell is the `DEFAULT_SHELL` string in the script, the starting point for a custom one: the handbook's brand palette and the component vocabulary of its `templates/md-to-html/default.html` (a header bar with the logo mark, a hero, a section label, cards, a footer) on the system font stacks, with no font file, no script and no network request, collapsing to one column below 680 px. pensa-grex's shell, the reference this command was generalised from, is that site's Googie-themed page (its bundled fonts, its palette with the light/dark toggle, its hero with the Downloads card and the icons, its own footer) with four of the placeholders in it (`{{root}}`, `{{intro}}`, `{{tag}}`, `{{groups}}`); 188 lines of which the placeholders are eleven, so it is not kept here as an example. The table above is the whole interface.
+
+### What it guarantees
+
+Standard library only, so the deploy path installs nothing. Nothing generated is committed: the site is assembled into `--out`, and the workflow uploads that directory. The build fails when a document has no title, when a placeholder survives the stamp (after `__LATEST_TAG__` is substituted in the hand-built pages, the shell and the intro, a token still shaped like it: two underscores at one end, one or more at the other, and `TAG` or `LATEST` as a part of its name, such as `__LATEST_TAG_` or `__NEXT_TAG__`; a `__FILE__` quoted in a page is not one), and when a relative `href`, `src` or CSS `url()` in a page it generated or stamped does not resolve against the assembled directory; it only reports an unresolved reference inside an HTML document copied from `docs/`, which is published as the repo holds it, and it does not check copied Markdown at all. Every GitHub link is pinned to one release tag. That tag is the newest `v*` tag reachable from `HEAD` and must be a `vX.Y.Z` release tag; it may be the previous release's when a run starts before this release's tag lands; that leniency is deliberate (a manual re-run on the changelog commit must still build), and a repo with no `v*` tag at all is refused. The contract, and the reasoning behind it, are the handbook's [`docs-site.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/docs-site.md).
+
+### In a repo's pages workflow
+
+The workflow checks the adopting repo out at `main` with its tags, checks dev-tools out into a subfolder at a pinned tag, and runs the script from there:
+
+```yaml
+- uses: actions/checkout@v6
+  with:
+    ref: main             # always publish the released state, never develop
+    fetch-depth: 0        # tags: the build reads the newest release from them
+- uses: actions/checkout@v6
+  with:
+    repository: ParkviewLab/dev-tools
+    ref: vX.Y.Z           # a released tag of dev-tools, pinned
+    path: dev-tools
+- uses: actions/setup-python@v6
+  with:
+    python-version: "3.13"
+- name: Build the site
+  run: python3 dev-tools/scripts/build-pages-site --out "${{ runner.temp }}/site"
+  # a repo with its own shell adds: --shell site/shell.html
+```
+
+Locally, `install.sh` links `build-pages-site` into `~/.local/bin` like the other scripts, so the same build runs from a repo's root (`build-pages-site --out /tmp/site --tag vX.Y.Z`); open the result with `python3 -m http.server` from that directory.
+
 ## Release flow (in brief)
 
 Releases are tag-driven and cut from `main`; CI gates publish on the tag being reachable from `origin/main`. The full flow + rationale (why bump+tag on `main`, the back-merge cascade, the CI gate) lives in the **[handbook's `releases.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md)**. The one-liner:
@@ -100,7 +172,7 @@ dev-tools is itself a `VERSION.txt` repo and is **released with these very tools
 
 ## Adding a tool
 
-1. Drop the script (executable, `#!/usr/bin/env bash`) into `scripts/`. Non-executable files (like `_sot.sh`) are *sourced*, not symlinked.
+1. Drop the script (executable, with its shebang: `#!/usr/bin/env bash`, or `#!/usr/bin/env python3` for a standard-library Python script) into `scripts/`. Non-executable files (like `_sot.sh`) are *sourced*, not symlinked.
 2. Document it here.
 3. PR onto `develop`. The bar: generic + cross-project, no project-specific logic. If it's only useful in one repo, it lives in that repo's `scripts/`.
 
