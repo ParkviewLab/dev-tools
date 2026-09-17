@@ -13,7 +13,7 @@ developer tooling; it follows the org's licensing conventions (see the
 
 | Bucket | License | What |
 |---|---|---|
-| Scripts, installer & CI — `scripts/**`, `install.sh`, `.github/**` | `AGPL-3.0-or-later` | the tooling |
+| Scripts, tests, installer & CI — `scripts/**`, `tests/**`, `install.sh`, `.github/**` | `AGPL-3.0-or-later` | the tooling |
 | Docs & repo meta — `README.md`, this file, `AGENTS.md`, `CLAUDE.md`, `VERSION.txt` | `CC-BY-4.0` | the writing |
 
 The split is encoded in [`REUSE.toml`](REUSE.toml) and per-file SPDX headers; the
