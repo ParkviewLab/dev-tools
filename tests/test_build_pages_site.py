@@ -682,5 +682,260 @@ class CliTests(Fixture):
             self.assertEqual(f.readline(), b"#!/usr/bin/env python3\n")
 
 
+# --------------------------------------------------------------------------- #
+# The correctness review
+# --------------------------------------------------------------------------- #
+
+
+class SymlinkGuardTests(Fixture):
+    """docs/ or site/ as a symlink still guards --out (else copytree recurses into itself)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.tmp / "real-docs").mkdir()
+        (self.tmp / "real-site").mkdir()
+        os.symlink(self.tmp / "real-docs", self.repo / "docs")
+        os.symlink(self.tmp / "real-site", self.repo / "site")
+        self.md("docs/a.md", "Alpha")
+
+    def test_out_inside_symlinked_docs_is_refused(self) -> None:
+        self.assertIn("must not be inside docs/", self.build_fails(out=self.repo / "docs" / "_site"))
+        self.assertEqual(sorted(p.name for p in (self.tmp / "real-docs").iterdir()), ["a.md"])
+
+    def test_out_inside_symlinked_site_is_refused(self) -> None:
+        self.assertIn("must not be inside site/", self.build_fails(out=self.repo / "site" / "_site"))
+        self.assertEqual(list((self.tmp / "real-site").iterdir()), [])
+
+    def test_symlinked_docs_and_site_still_build_elsewhere(self) -> None:
+        self.build()
+        self.assertTrue((self.out / "docs" / "a.md").is_file())
+
+
+class ExactPlaceholderTests(Fixture):
+    """A placeholder is written exactly; other braces fail rather than being published."""
+
+    def test_loose_shapes_are_rejected(self) -> None:
+        self.md("docs/a.md")
+        for token in ("{{ title }}", "{{Title}}", "{{TITLE}}", "{{title-x}}", "{{ groups}}"):
+            shell = self.write("shell.html", f"<html>{{{{groups}}}}{token}</html>\n")
+            err = self.build_fails("--shell", str(shell))
+            self.assertIn(f"unknown placeholder {token}", err, token)
+            self.assertIn("written exactly so", err)
+
+    def test_a_loose_groups_does_not_count_as_groups(self) -> None:
+        self.md("docs/a.md")
+        shell = self.write("shell.html", "<html>{{ groups }}</html>\n")
+        self.assertIn("unknown placeholder {{ groups }}", self.build_fails("--shell", str(shell)))
+
+
+class TagTokenTests(Fixture):
+    """__LATEST_TAG__ in a shell or in the intro is stamped, and a misspelling of it fails."""
+
+    def test_token_in_shell_and_intro_is_stamped(self) -> None:
+        self.md("docs/a.md")
+        self.write("site/intro.html", "<p>Current release: __LATEST_TAG__.</p>\n")
+        shell = self.write("shell.html", "<html><title>__LATEST_TAG__</title>\n{{intro}}\n{{groups}}</html>\n")
+        self.build("--shell", str(shell))
+        page = self.page()
+        self.assertIn("<title>v1.2.3</title>", page)
+        self.assertIn("<p>Current release: v1.2.3.</p>", page)
+        self.assertNotIn("__LATEST_TAG__", page)
+
+    def test_misspelt_token_in_intro_fails(self) -> None:
+        self.md("docs/a.md")
+        self.write("site/intro.html", "<p>Release __LATEST_TAG_ here.</p>\n")
+        err = self.build_fails()
+        self.assertIn("survived the stamp", err)
+        self.assertRegex(err, r"index\.html:\d+: __LATEST_TAG_")
+
+    def test_misspelt_token_in_shell_fails(self) -> None:
+        self.md("docs/guide/a.md")
+        shell = self.write("shell.html", "<html>\n<p>__NEXT_TAG__</p>\n{{groups}}</html>\n")
+        self.assertIn("index.html:2: __NEXT_TAG__", self.build_fails("--shell", str(shell)))
+
+
+class SurvivorShapeTests(Fixture):
+    """The survivor rule catches misspellings of the tag token and nothing else."""
+
+    def test_shapes(self) -> None:
+        caught = ("__LATEST_TAG_", "_LATEST_TAG__", "__NEXT_TAG__", "__LATSET_TAG__", "__LATEST__", "__TAG__", "__LATEST_TGA__")
+        passed = ("__FILE__", "__VERSION__", "__STAGE__", "__DEV__", "__proto__", "'__LATEST'", "MY_LATEST_TAG_VALUE", "__latest_tag__")
+        for token in caught:
+            self.assertIsNotNone(bps.SURVIVOR_RE.search(f"x {token} y"), token)
+        for token in passed:
+            self.assertIsNone(bps.SURVIVOR_RE.search(f"x {token} y"), token)
+
+    def test_quoted_dunders_build(self) -> None:
+        self.md("docs/a.md")
+        self.write("site/dl/index.html", "<html><body><code>__FILE__</code> __VERSION__ __STAGE__ __LATEST_TAG__</body></html>\n")
+        self.build()
+        self.assertIn("<code>__FILE__</code> __VERSION__ __STAGE__ v1.2.3", self.page("dl/index.html"))
+
+    def test_misspelt_tag_token_in_a_hand_built_page_fails(self) -> None:
+        self.md("docs/a.md")
+        self.write("site/dl/index.html", "<html><body>__LATEST_TAG_</body></html>\n")
+        self.assertIn("dl/index.html:1: __LATEST_TAG_", self.build_fails())
+
+
+class BomTests(Fixture):
+    """A UTF-8 byte-order mark hides neither a title nor a leading comment."""
+
+    def test_markdown_title_behind_a_bom(self) -> None:
+        path = self.repo / "docs" / "a.md"
+        path.parent.mkdir()
+        path.write_bytes("\ufeff# Bom title\n".encode("utf-8"))
+        self.assertEqual(bps.markdown_title(path), "Bom title")
+
+    def test_html_title_behind_a_bom(self) -> None:
+        path = self.repo / "docs" / "a.html"
+        path.parent.mkdir()
+        path.write_bytes(("\ufeff" + HTML_DOC.format(title="Bom html", meta="", body="")).encode("utf-8"))
+        self.assertEqual(bps.html_head(path), ("Bom html", None))
+
+    def test_intro_comment_behind_a_bom_is_stripped(self) -> None:
+        self.md("docs/a.md")
+        intro = self.repo / "site" / "intro.html"
+        intro.parent.mkdir()
+        intro.write_bytes("\ufeff<!-- SPDX-License-Identifier: CC-BY-4.0 -->\n<p>Hi</p>\n".encode("utf-8"))
+        self.build()
+        page = self.page()
+        self.assertIn("<p>Hi</p>", page)
+        self.assertNotIn("SPDX", page)
+        self.assertNotIn("\ufeff", page)
+
+
+class OddNameTests(Fixture):
+    """A document or folder name with # or a space is percent-encoded in its link."""
+
+    def test_hash_and_space_in_names(self) -> None:
+        self.html("docs/q#1.html", "Hash")
+        self.html("docs/a b.html", "Space")
+        self.html("docs/guide x/c.html", "Folder space")
+        self.build()
+        page = self.page()
+        self.assertIn('href="docs/q%231.html">Hash</a>', page)
+        self.assertIn('href="docs/a%20b.html">Space</a>', page)
+        self.assertIn('href="docs/guide%20x/">guide x/</a>', page)
+        self.assertIn('href="c.html">Folder space</a>', self.page("docs/guide x/index.html"))
+
+
+class UnreadableInputTests(Fixture):
+    """A bad document or a bad copy is a build error line, not a traceback."""
+
+    def test_non_utf8_document_fails(self) -> None:
+        self.md("docs/ok.md")
+        (self.repo / "docs" / "bad.md").write_bytes(b"# T\xff\xfe\n")
+        self.assertIn("docs/bad.md is not UTF-8", self.build_fails())
+
+    def test_dangling_symlink_in_docs_fails(self) -> None:
+        self.md("docs/ok.md")
+        os.symlink(self.repo / "docs" / "missing.md", self.repo / "docs" / "dangling.md")
+        err = self.build_fails()
+        self.assertIn("cannot copy docs/", err)
+        self.assertIn("dangling.md", err)
+
+
+class ShellLocationTests(Fixture):
+    """A shell under docs/ would be published as a document, so it is refused."""
+
+    def test_shell_under_docs_is_refused(self) -> None:
+        self.md("docs/a.md")
+        shell = self.write("docs/shell.html", "<html>{{groups}}</html>\n")
+        self.assertIn("lives under docs/", self.build_fails("--shell", str(shell)))
+        self.assertFalse(self.out.exists())
+
+
+class CaseMismatchedIndexTests(Fixture):
+    """docs/g/Index.html is no index to Pages and must not be overwritten by the generated one."""
+
+    def test_case_mismatched_index_fails(self) -> None:
+        self.html("docs/g/Index.html", "Own")
+        self.md("docs/g/one.md", "One")
+        err = self.build_fails()
+        self.assertIn("docs/g/Index.html", err)
+        self.assertIn("index.html exactly", err)
+
+    def test_exact_index_is_kept(self) -> None:
+        own = self.html("docs/g/index.html", "Own")
+        self.md("docs/g/one.md", "One")
+        self.build()
+        self.assertEqual((self.out / "docs" / "g" / "index.html").read_bytes(), own.read_bytes())
+
+
+class HeadScannerTests(Fixture):
+    """The title is the first <title>; an inline svg's is not appended to it."""
+
+    def test_svg_title_in_a_body_without_head_end(self) -> None:
+        path = self.write("docs/a.html", "<html><head><title>Doc</title>\n<body><svg><title>Icon</title></svg></body></html>\n")
+        self.assertEqual(bps.html_head(path), ("Doc", None))
+
+    def test_svg_title_inside_the_head(self) -> None:
+        path = self.write("docs/a.html", '<html><head><title>Doc</title><svg><title>Icon</title></svg><meta name="description" content="D"></head></html>\n')
+        self.assertEqual(bps.html_head(path), ("Doc", "D"))
+
+    def test_body_ends_the_scan(self) -> None:
+        path = self.write("docs/a.html", '<html><head><title>Doc</title>\n<body><meta name="description" content="late"></body></html>\n')
+        self.assertEqual(bps.html_head(path), ("Doc", None))
+
+
+class TagShapeTests(Fixture):
+    """Only vX.Y.Z tags are releases, from git and from --tag alike."""
+
+    @unittest.skipUnless(GIT, "git is not installed")
+    def test_vnext_is_skipped_for_the_release_tag(self) -> None:
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "one")
+        git(self.repo, "tag", "v1.2.3")
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "two")
+        git(self.repo, "tag", "vnext")
+        self.assertEqual(bps.release_tag(None, self.repo), "v1.2.3")
+
+    @unittest.skipUnless(GIT, "git is not installed")
+    def test_only_vnext_is_no_release(self) -> None:
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "one")
+        git(self.repo, "tag", "vnext")
+        with self.assertRaisesRegex(bps.BuildError, "no v\\* tag reachable"):
+            bps.release_tag(None, self.repo)
+
+    @unittest.skipUnless(GIT, "git is not installed")
+    def test_v2_is_not_a_release_tag(self) -> None:
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "one")
+        git(self.repo, "tag", "v2")
+        with self.assertRaisesRegex(bps.BuildError, "not a vX.Y.Z release tag"):
+            bps.release_tag(None, self.repo)
+
+    def test_explicit_vnext_is_refused(self) -> None:
+        with self.assertRaises(bps.BuildError):
+            bps.release_tag("vnext", self.repo)
+
+
+class RepoRootTests(Fixture):
+    """--repo must be the root of its checkout, so a subdirectory never borrows its origin."""
+
+    @unittest.skipUnless(GIT, "git is not installed")
+    def test_subdirectory_of_a_checkout_is_refused(self) -> None:
+        git(self.repo, "remote", "add", "origin", "git@github.com:ParkviewLab/outer.git")
+        sub = self.repo / "sub"
+        (sub / "docs").mkdir(parents=True)
+        (sub / "docs" / "a.md").write_text("# A\n", encoding="utf-8")
+        with self.assertRaisesRegex(bps.BuildError, "is not its root"):
+            bps.repository(str(sub))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = bps.main(["--out", str(self.out), "--tag", "v1.2.3", "--repo", str(sub)])
+        self.assertEqual(code, 1)
+        self.assertIn("is not its root", stderr.getvalue())
+        self.assertFalse(self.out.exists())
+
+
+class EmptyDocsTests(Fixture):
+    """An empty docs/ builds, and the log says so."""
+
+    def test_empty_docs_warns(self) -> None:
+        (self.repo / "docs").mkdir()
+        log = self.build()
+        self.assertIn("wrote index.html: 0 documents", log)
+        self.assertIn("warning: docs/ holds no documents; the index lists nothing", log)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,8 @@ into DIR, a new or empty directory:
     <page>/         every other file under site/, copied as it is, with the
                     release tag stamped into each .html in place of
                     __LATEST_TAG__ (site/intro.html and the shell file, when it
-                    lives under site/, are not copied)
+                    lives under site/, are not copied; a shell under docs/ is
+                    refused, since it would be published as a document)
     docs/           docs/, byte-identical to the repository, plus a generated
                     index.html in any subfolder that holds documents
 
@@ -23,13 +24,16 @@ checkout of dev-tools in a subfolder, is ignored; site/ is optional, as is the
 introduction, and a repository with neither publishes its docs/ alone.
 
 The release tag is --tag if given, else the newest v* tag reachable from HEAD
-(git describe --tags --abbrev=0 --match 'v*'). A tag reachable from HEAD may be
+(git describe --tags --abbrev=0 --match 'v[0-9]*'); either way it must be a
+vX.Y.Z release tag, so a vnext is refused. A tag reachable from HEAD may be
 the previous release's rather than this one's: a run that starts before the tag
 lands stamps the previous release and publishes, and a manual re-run on the
 changelog commit that follows a release still builds. A repository with no v*
 tag at all fails the build. Every GitHub link the build emits is pinned to that
 tag, and the repository is read off the origin remote (GITHUB_REPOSITORY when
-there is no remote to read).
+there is no remote to read). --repo must be the root of its git checkout when
+it is inside one, so a subdirectory never borrows the enclosing checkout's
+remote.
 
 The document list groups, in order: the northstar (northstar.html if present,
 else northstar.md); the other HTML documents; the Markdown specifications and
@@ -64,8 +68,18 @@ required and the rest optional:
 
 A placeholder that starts its line is indented to that line's column, every
 line of a multi-line value with it, so the output follows the shell's own
-layout. Any other {{name}} in the shell fails the build. The intro, the groups
-and the footer are HTML fragments, inserted as they are.
+layout. A placeholder is written exactly as listed: any other {{...}} in the
+shell, a different case or spacing included, fails the build. The intro, the
+groups and the footer are HTML fragments, inserted as they are. __LATEST_TAG__
+is substituted in the shell and in the intro as well, so either form gives the
+release tag.
+
+After the stamp, a token still shaped like the tag placeholder fails the
+build, in a hand-built page and in a generated one alike: two underscores at
+one end and at least one at the other, with TAG or LATEST as one of the
+underscore-separated parts of its name (a misspelt __LATEST_TAG_, a
+__NEXT_TAG__). __FILE__ or __VERSION__ quoted in a page is not one, nor is the
+partial '__LATEST' a script may test for.
 
 After writing, every relative href, src and CSS url() in the generated and
 stamped pages is resolved against DIR; the build fails, listing the missing
@@ -80,9 +94,10 @@ docs/docs-site.md.
 
 Exit codes:
   0  success
-  1  build failure (no tag, no docs/, an untitled document, a placeholder
-     surviving the stamp, an unresolved reference, an unusable --out or
-     --shell, no repository to link to)
+  1  build failure (no tag, no docs/, an untitled or unreadable document, a
+     placeholder surviving the stamp, an unresolved reference, an unusable
+     --out, --shell or --repo, a folder index not spelt index.html, no
+     repository to link to)
   2  bad arguments
 """
 
@@ -105,9 +120,16 @@ from urllib.parse import quote, unquote, urlsplit
 PROG = "build-pages-site"
 
 TAG_PLACEHOLDER = "__LATEST_TAG__"
-# After the stamp, any token still shaped like a placeholder is one that was
-# misspelt or never substituted; it fails the build rather than going public.
-SURVIVOR_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
+# After the stamp, a token still shaped like the tag placeholder is one that
+# was misspelt or never substituted; it fails the build rather than going
+# public. The shape: two underscores at one end and at least one at the other,
+# with TAG or LATEST as one of the underscore-separated parts of the name.
+# __FILE__ or __VERSION__ quoted in a page is not one, nor is the partial
+# '__LATEST' a script may test for.
+SURVIVOR_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:__(?:[A-Z0-9]+_)*(?:TAG|LATEST)(?:_[A-Z0-9]+)*_+"
+    r"|_+(?:[A-Z0-9]+_)*(?:TAG|LATEST)(?:_[A-Z0-9]+)*__)(?![A-Za-z0-9_])"
+)
 TAG_RE = re.compile(r"v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?")
 DOC_SUFFIXES = (".html", ".md")
 
@@ -125,10 +147,23 @@ GROUPS = (
 # line's indentation, which the substitution applies to every line of the value.
 PLACEHOLDERS = ("title", "intro", "groups", "root", "tag", "repo", "footer")
 PLACEHOLDER_RE = re.compile(r"(?:^([ \t]*))?\{\{([a-z]+)\}\}", re.MULTILINE)
+# Anything between double braces; only the exact tokens above are placeholders,
+# and the rest fail the build rather than being published as they are.
+LOOSE_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]*\}\}")
 
 
 class BuildError(Exception):
     """A condition that must fail the build, with a message for the log."""
+
+
+def read_utf8(path: Path, label: str) -> str:
+    """The file's text, a byte-order mark dropped; a build error when unreadable."""
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise BuildError(f"{label} is not UTF-8: {e}") from None
+    except OSError as e:
+        raise BuildError(f"{label} cannot be read: {e}") from None
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +209,9 @@ def repository(root_arg: str) -> Repository:
     root = Path(root_arg).resolve()
     if not root.is_dir():
         raise BuildError(f"--repo {root_arg}: not a directory")
+    top = git_output(root, "rev-parse", "--show-toplevel")
+    if top and Path(top).resolve() != root:
+        raise BuildError(f"--repo {root_arg} is inside the checkout at {top} but is not its root; pass the root")
     m = REMOTE_RE.search(git_output(root, "remote", "get-url", "origin"))
     if m:
         return Repository(root, m["owner"], m["name"])
@@ -192,12 +230,14 @@ def release_tag(explicit: str | None, root: Path) -> str:
         if not TAG_RE.fullmatch(explicit):
             raise BuildError(f"--tag {explicit!r} is not a vX.Y.Z tag")
         return explicit
-    tag = git_output(root, "describe", "--tags", "--abbrev=0", "--match", "v*")
+    tag = git_output(root, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*")
     if not tag:
         raise BuildError(
-            "no v* tag reachable from HEAD (git describe --tags --abbrev=0 --match 'v*'); "
+            "no v* tag reachable from HEAD (git describe --tags --abbrev=0 --match 'v[0-9]*'); "
             "refusing to publish a site with no release to pin to"
         )
+    if not TAG_RE.fullmatch(tag):
+        raise BuildError(f"the newest v* tag reachable from HEAD, {tag!r}, is not a vX.Y.Z release tag")
     return tag
 
 
@@ -229,6 +269,7 @@ class Folder:
     documents: list[Document] = field(default_factory=list)
     subfolders: list[Folder] = field(default_factory=list)
     has_own_index: bool = False  # the repository ships docs/<rel>/index.html
+    index_clash: list[str] = field(default_factory=list)  # an Index.html or the like: not an index to Pages
 
     @property
     def holds_documents(self) -> bool:
@@ -236,27 +277,37 @@ class Folder:
 
 
 class HeadScanner(HTMLParser):
-    """Collects an HTML document's <title> text and description meta."""
+    """Collects an HTML document's <title> text and description meta.
+
+    The title is the first <title> element; a later one (an inline <svg>'s,
+    say) is not appended to it. Scanning stops at </head> or at <body>,
+    whichever comes first.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.title_parts: list[str] = []
         self.description: str | None = None
         self._in_title = False
+        self._title_done = False
         self._done = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if self._done:
             return
         if tag == "title":
-            self._in_title = True
+            self._in_title = not self._title_done
         elif tag == "meta" and self.description is None:
             a = dict(attrs)
             if (a.get("name") or "").strip().lower() == "description" and a.get("content"):
                 self.description = normalise_ws(a["content"] or "")
+        elif tag == "body":
+            self._done = True
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "title":
+            if self._in_title:
+                self._title_done = True
             self._in_title = False
         elif tag == "head":
             self._done = True
@@ -274,9 +325,9 @@ def normalise_ws(text: str) -> str:
     return " ".join(text.split())
 
 
-def html_head(path: Path) -> tuple[str, str | None]:
+def html_head(path: Path, label: str | None = None) -> tuple[str, str | None]:
     scanner = HeadScanner()
-    scanner.feed(path.read_text(encoding="utf-8"))
+    scanner.feed(read_utf8(path, label or str(path)))
     scanner.close()
     return scanner.title, scanner.description
 
@@ -285,25 +336,23 @@ FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 H1_RE = re.compile(r"^ {0,3}#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 
 
-def markdown_title(path: Path) -> str:
+def markdown_title(path: Path, label: str | None = None) -> str:
     """The text of the first "# " heading, skipping fenced code blocks."""
     fence: str | None = None
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            m = FENCE_RE.match(line)
-            if m:
-                marker = m.group(1)[0]
-                if fence is None:
-                    fence = marker
-                elif marker == fence:
-                    fence = None
-                continue
-            if fence:
-                continue
-            m = H1_RE.match(line)
-            if m:
-                return normalise_ws(m.group(1))
+    for line in read_utf8(path, label or str(path)).splitlines():
+        m = FENCE_RE.match(line)
+        if m:
+            marker = m.group(1)[0]
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            continue
+        if fence:
+            continue
+        m = H1_RE.match(line)
+        if m:
+            return normalise_ws(m.group(1))
     return ""
 
 
@@ -318,10 +367,10 @@ def scan_folder(docs_dir: Path, rel: PurePosixPath, untitled: list[str]) -> Fold
             continue
         doc_rel = rel / p.name if str(rel) != "." else PurePosixPath(p.name)
         if p.suffix.lower() == ".html":
-            title, description = html_head(p)
+            title, description = html_head(p, f"docs/{doc_rel}")
             doc = Document(doc_rel, "html", title, description)
         else:
-            doc = Document(doc_rel, "md", markdown_title(p))
+            doc = Document(doc_rel, "md", markdown_title(p, f"docs/{doc_rel}"))
         if not doc.title:
             untitled.append(str(doc_rel))
         by_name[p.name] = doc
@@ -333,6 +382,7 @@ def scan_folder(docs_dir: Path, rel: PurePosixPath, untitled: list[str]) -> Fold
     twins = {id(d.twin) for d in by_name.values() if d.twin is not None}
     folder.documents = [d for d in by_name.values() if id(d) not in twins]
     folder.has_own_index = "index.html" in by_name
+    folder.index_clash = sorted(n for n in by_name if n.casefold() == "index.html" and n != "index.html")
     for p in entries:
         if p.is_dir():
             sub_rel = rel / p.name if str(rel) != "." else PurePosixPath(p.name)
@@ -558,17 +608,24 @@ def load_shell(arg: str | None) -> Shell:
         path = Path(arg)
         if not path.is_file():
             raise BuildError(f"--shell {arg}: no such file")
-        shell = Shell(path.read_text(encoding="utf-8"), path.resolve())
-    names = {m.group(2) for m in PLACEHOLDER_RE.finditer(shell.text)}
-    unknown = sorted(names - set(PLACEHOLDERS))
+        shell = Shell(read_utf8(path, f"--shell {arg}"), path.resolve())
+    tokens = {m.group() for m in LOOSE_PLACEHOLDER_RE.finditer(shell.text)}
+    known = ["{{" + n + "}}" for n in PLACEHOLDERS]
+    unknown = sorted(tokens.difference(known))
     if unknown:
         raise BuildError(
-            f"{shell.label}: unknown placeholder {', '.join('{{' + n + '}}' for n in unknown)}; "
-            f"the set is {', '.join('{{' + n + '}}' for n in PLACEHOLDERS)}"
+            f"{shell.label}: unknown placeholder {', '.join(unknown)}; "
+            f"the set, written exactly so, is {', '.join(known)}"
         )
-    if "groups" not in names:
+    if "{{groups}}" not in tokens:
         raise BuildError(f"{shell.label} has no {{{{groups}}}} placeholder; the document list has nowhere to go")
     return shell
+
+
+def check_shell_location(shell: Shell, repo: Repository) -> None:
+    """A shell under docs/ would be copied, scanned as a document and listed."""
+    if shell.path is not None and shell.path.is_relative_to(repo.docs_dir.resolve()):
+        raise BuildError(f"{shell.label} lives under docs/ and would be published as a document; keep it under site/")
 
 
 def fill(shell: Shell, values: dict[str, str]) -> str:
@@ -593,7 +650,7 @@ def github_blob(repo: Repository, tag: str, rel: PurePosixPath) -> str:
 def render_document(doc: Document, repo: Repository, tag: str, page_dir: str) -> str:
     """One card. page_dir is the page's folder relative to the site root."""
     if doc.kind == "html":
-        href = posixpath.relpath(f"docs/{doc.rel}", page_dir)
+        href = quote(posixpath.relpath(f"docs/{doc.rel}", page_dir), safe="/")
     else:
         href = github_blob(repo, tag, doc.rel)
     lines = [f'  <li class="doc"><a class="doc-title" href="{esc(href)}">{esc(doc.title)}</a>']
@@ -627,7 +684,7 @@ def render_groups(folder: Folder, repo: Repository, tag: str, page_dir: str) -> 
     if folder.subfolders:
         cards = []
         for sub in sorted(folder.subfolders, key=lambda f: str(f.rel).casefold()):
-            href = posixpath.relpath(f"docs/{sub.rel}", page_dir) + "/"
+            href = quote(posixpath.relpath(f"docs/{sub.rel}", page_dir) + "/", safe="/")
             cards.append(f'  <li class="doc"><a class="doc-title" href="{esc(href)}">{esc(sub.rel.name)}/</a></li>')
         sections.append(
             '<div class="group folders">\n  <h3>Folders</h3>\n'
@@ -643,7 +700,7 @@ def read_intro(repo: Repository) -> str:
     """site/intro.html without its leading comments; "" when there is none."""
     if not repo.intro_file.is_file():
         return ""
-    text = LEADING_COMMENTS_RE.sub("", repo.intro_file.read_text(encoding="utf-8")).rstrip()
+    text = LEADING_COMMENTS_RE.sub("", read_utf8(repo.intro_file, "site/intro.html")).rstrip()
     if not text:
         raise BuildError("site/intro.html holds no introduction; delete it to publish without one")
     return text
@@ -661,11 +718,12 @@ def render_page(
 ) -> tuple[str, dict[str, int]]:
     """The root index (folder.rel == ".") or a folder index, and its group counts."""
     if str(folder.rel) == ".":
-        title, root, page_dir = repo.name, "", "."
+        title, root, page_dir, label = repo.name, "", ".", "index.html"
     else:
         title = f"{repo.name} · docs/{folder.rel}"
         root = "../" * (len(folder.rel.parts) + 1)
         page_dir = f"docs/{folder.rel}"
+        label = f"{page_dir}/index.html"
     groups, counts = render_groups(folder, repo, tag, page_dir)
     values = {
         "title": esc(title),
@@ -676,7 +734,7 @@ def render_page(
         "repo": esc(repo.name),
         "footer": render_footer(repo, tag),
     }
-    return fill(shell, values), counts
+    return stamp_text(fill(shell, values), tag, label), counts
 
 
 # --------------------------------------------------------------------------- #
@@ -770,7 +828,8 @@ def copied_documents(out: Path, generated: list[Path]) -> list[Path]:
 def prepare_out(out_arg: str, repo: Repository) -> Path:
     out = Path(out_arg).resolve()
     for guarded in (repo.site_dir, repo.docs_dir):
-        if out == guarded or guarded in out.parents:
+        real = guarded.resolve()  # docs/ or site/ may itself be a symlink
+        if out == real or real in out.parents:
             raise BuildError(f"--out must not be inside {guarded.relative_to(repo.root)}/")
     if out.exists():
         if not out.is_dir():
@@ -778,8 +837,23 @@ def prepare_out(out_arg: str, repo: Repository) -> Path:
         if any(out.iterdir()):
             raise BuildError(f"--out {out} is not empty; pass a new or empty directory")
     else:
-        out.mkdir(parents=True)
+        try:
+            out.mkdir(parents=True)
+        except OSError as e:
+            raise BuildError(f"cannot create --out {out}: {e}") from None
     return out
+
+
+def copy_tree(src: Path, dst: Path, label: str, ignore, dirs_exist_ok: bool = False) -> None:
+    """shutil.copytree with its failures (a dangling symlink, a permission) as build errors."""
+    try:
+        shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=dirs_exist_ok)
+    except shutil.Error as e:
+        problems = e.args[0] if e.args and isinstance(e.args[0], list) else [str(e)]
+        lines = [f"{p[0]}: {p[2]}" if isinstance(p, tuple) and len(p) == 3 else str(p) for p in problems]
+        raise BuildError(f"cannot copy {label}:\n    " + "\n    ".join(lines)) from None
+    except OSError as e:
+        raise BuildError(f"cannot copy {label}: {e}") from None
 
 
 def ignore_dot_entries(directory: str, names: list[str]) -> set[str]:
@@ -806,26 +880,35 @@ def copy_site(repo: Repository, out: Path, shell: Shell) -> list[str]:
         raise BuildError("site/docs/ would collide with the published docs/; hand-built pages go in other folders")
     if (repo.site_dir / "index.html").exists():
         raise BuildError("site/index.html would be overwritten by the generated index; the root page is the shell")
-    shutil.copytree(repo.site_dir, out, ignore=ignore, dirs_exist_ok=True)
+    copy_tree(repo.site_dir, out, "site/", ignore, dirs_exist_ok=True)
     return left_out
+
+
+def stamp_text(text: str, tag: str, label: str) -> str:
+    """The text with the release tag in place of __LATEST_TAG__; a token still shaped like it fails."""
+    text = text.replace(TAG_PLACEHOLDER, tag)
+    survivors = [f"{label}:{text.count(chr(10), 0, m.start()) + 1}: {m.group()}" for m in SURVIVOR_RE.finditer(text)]
+    if survivors:
+        raise BuildError(
+            f"placeholders survived the stamp (the build substitutes {TAG_PLACEHOLDER} only):\n    "
+            + "\n    ".join(survivors)
+        )
+    return text
 
 
 def stamp_pages(out: Path, tag: str) -> list[Path]:
     """Substitute the release tag into every hand-built page copied from site/."""
     pages = sorted(p for p in out.rglob("*") if p.is_file() and p.suffix.lower() == ".html")
     for page in pages:
+        label = str(page.relative_to(out))
         try:
-            with page.open(encoding="utf-8", newline="") as f:
+            with page.open(encoding="utf-8", newline="") as f:  # the bytes stay as they are, the stamp apart
                 text = f.read()
         except UnicodeDecodeError as e:
-            raise BuildError(f"{page.relative_to(out)} is not UTF-8: {e}") from None
-        text = text.replace(TAG_PLACEHOLDER, tag)
-        survivors = [f"{page.relative_to(out)}:{text.count(chr(10), 0, m.start()) + 1}: {m.group()}" for m in SURVIVOR_RE.finditer(text)]
-        if survivors:
-            raise BuildError(
-                f"placeholders survived the stamp (the build substitutes {TAG_PLACEHOLDER} only):\n    "
-                + "\n    ".join(survivors)
-            )
+            raise BuildError(f"{label} is not UTF-8: {e}") from None
+        except OSError as e:
+            raise BuildError(f"{label} cannot be read: {e}") from None
+        text = stamp_text(text, tag, label)
         with page.open("w", encoding="utf-8", newline="") as f:
             f.write(text)
     return pages
@@ -855,7 +938,7 @@ def build(repo: Repository, out: Path, tag: str, shell: Shell) -> None:
             print(f"  stamped {tag} into {plural(len(pages), 'hand-built page')}: {names}")
     else:
         print("  no site/ directory; publishing docs/ alone")
-    shutil.copytree(repo.docs_dir, out / "docs", ignore=ignore_dot_entries)
+    copy_tree(repo.docs_dir, out / "docs", "docs/", ignore_dot_entries)
     print(f"  copied docs/ ({plural(count_files(out / 'docs'), 'file')})")
 
     untitled: list[str] = []
@@ -870,6 +953,8 @@ def build(repo: Repository, out: Path, tag: str, shell: Shell) -> None:
     summary = ", ".join(f"{key} {counts[key]}" for key, _ in GROUPS)
     intro_note = "" if intro else ", no introduction"
     print(f"  wrote index.html: {plural(len(root_folder.documents), 'document')} ({summary}){intro_note}")
+    if not root_folder.holds_documents:
+        print("  warning: docs/ holds no documents; the index lists nothing")
 
     pending = list(root_folder.subfolders)
     while pending:
@@ -878,6 +963,12 @@ def build(repo: Repository, out: Path, tag: str, shell: Shell) -> None:
         if folder.has_own_index:
             print(f"  docs/{folder.rel}/index.html ships in the repository; not generated")
             continue
+        if folder.index_clash:
+            raise BuildError(
+                f"docs/{folder.rel}/{folder.index_clash[0]}: a folder's own index is index.html exactly (Pages "
+                "serves no other spelling), and the index the build generates would overwrite this file on a "
+                "case-insensitive filesystem; rename it"
+            )
         page, counts = render_page(shell, repo, tag, folder, "")
         target = out / "docs" / folder.rel / "index.html"
         target.write_text(page, encoding="utf-8")
@@ -917,6 +1008,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repo = repository(args.repo)
         shell = load_shell(args.shell)
+        check_shell_location(shell, repo)
         out = prepare_out(args.out, repo)
         build(repo, out, release_tag(args.tag, repo.root), shell)
     except BuildError as e:
