@@ -405,11 +405,13 @@ class IndexTests(Fixture):
 
     def test_intro_is_inserted_without_its_leading_comments(self) -> None:
         self.md("docs/a.md")
+        # REUSE-IgnoreStart: the tags below are fixture text, not this file's licensing
         self.write(
             "site/intro.html",
             "<!--\nSPDX-FileCopyrightText: 2026 someone\nSPDX-License-Identifier: CC-BY-4.0\n-->\n"
             "<!-- an explanatory comment -->\n<p>First.</p>\n<p>Second.</p>\n\n",
         )
+        # REUSE-IgnoreEnd
         self.build()
         page = self.page()
         self.assertIn("      <p>First.</p>\n      <p>Second.</p>\n", page)
@@ -796,7 +798,9 @@ class BomTests(Fixture):
         self.md("docs/a.md")
         intro = self.repo / "site" / "intro.html"
         intro.parent.mkdir()
+        # REUSE-IgnoreStart: the tag below is fixture text, not this file's licensing
         intro.write_bytes("\ufeff<!-- SPDX-License-Identifier: CC-BY-4.0 -->\n<p>Hi</p>\n".encode("utf-8"))
+        # REUSE-IgnoreEnd
         self.build()
         page = self.page()
         self.assertIn("<p>Hi</p>", page)
