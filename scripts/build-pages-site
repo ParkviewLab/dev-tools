@@ -1,0 +1,929 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Build a repository's GitHub Pages documentation site from released content.
+
+Usage:
+    build-pages-site --out DIR [--tag vX.Y.Z] [--shell FILE] [--repo DIR]
+
+Assembles the site of the repository at --repo (default: the current directory)
+into DIR, a new or empty directory:
+
+    index.html      generated: the page shell around the introduction
+                    (site/intro.html) and a list of the documents in docs/
+    <page>/         every other file under site/, copied as it is, with the
+                    release tag stamped into each .html in place of
+                    __LATEST_TAG__ (site/intro.html and the shell file, when it
+                    lives under site/, are not copied)
+    docs/           docs/, byte-identical to the repository, plus a generated
+                    index.html in any subfolder that holds documents
+
+Only docs/ and site/ are read. Anything else at the repository root, such as a
+checkout of dev-tools in a subfolder, is ignored; site/ is optional, as is the
+introduction, and a repository with neither publishes its docs/ alone.
+
+The release tag is --tag if given, else the newest v* tag reachable from HEAD
+(git describe --tags --abbrev=0 --match 'v*'). A tag reachable from HEAD may be
+the previous release's rather than this one's: a run that starts before the tag
+lands stamps the previous release and publishes, and a manual re-run on the
+changelog commit that follows a release still builds. A repository with no v*
+tag at all fails the build. Every GitHub link the build emits is pinned to that
+tag, and the repository is read off the origin remote (GITHUB_REPOSITORY when
+there is no remote to read).
+
+The document list groups, in order: the northstar (northstar.html if present,
+else northstar.md); the other HTML documents; the Markdown specifications and
+notes; the ideas under consideration (in-flight_ideas.md and *_ideas.md);
+CONTRIBUTING.md. A Markdown file whose basename has an .html twin is listed
+once, under the twin, with a "Markdown source" link. Within a group the order
+is by title. Titles come from an HTML file's <title> or a Markdown file's first
+"# " heading, descriptions from <meta name="description"> when present; a
+document without a title fails the build. HTML documents are linked
+relatively; Markdown documents, and the "Markdown source" links, go to
+GitHub's rendered view pinned to the tag. Every other link is relative.
+
+The page shell
+--------------
+The root index and every folder index are the shell with its placeholders
+substituted. --shell FILE names it; without --shell the built-in default, in
+the ParkviewLab brand, is used. The placeholders, of which {{groups}} is
+required and the rest optional:
+
+    {{title}}     the page title, escaped: the repository name on the root
+                  page, "<repo> · docs/<folder>" on a folder index
+    {{intro}}     site/intro.html without its leading comments, on the root
+                  page; empty on a folder index, and when there is no intro
+    {{groups}}    the document list: the groups above and, where the folder
+                  has subfolders holding documents, a "Folders" group
+    {{root}}      the relative path from the page's folder to the site root:
+                  "" on the root page, "../../" in docs/<folder>/
+    {{tag}}       the release tag, escaped
+    {{repo}}      the repository name (the GitHub slug), escaped
+    {{footer}}    two <span>s: the release the site is published from, linked
+                  to its tree on GitHub, and a link to the repository
+
+A placeholder that starts its line is indented to that line's column, every
+line of a multi-line value with it, so the output follows the shell's own
+layout. Any other {{name}} in the shell fails the build. The intro, the groups
+and the footer are HTML fragments, inserted as they are.
+
+After writing, every relative href, src and CSS url() in the generated and
+stamped pages is resolved against DIR; the build fails, listing the missing
+targets, if any does not resolve. The HTML documents copied from docs/ are
+checked the same way but only reported: docs/ is published exactly as the
+repository holds it, so a reference of its own that does not resolve is a
+defect to fix in that document, not a reason to withhold the whole site.
+Copied Markdown is not checked at all.
+
+Standard library only. The contract and the guarantees are the handbook's
+docs/docs-site.md.
+
+Exit codes:
+  0  success
+  1  build failure (no tag, no docs/, an untitled document, a placeholder
+     surviving the stamp, an unresolved reference, an unusable --out or
+     --shell, no repository to link to)
+  2  bad arguments
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import os
+import posixpath
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+from dataclasses import dataclass, field
+from html.parser import HTMLParser
+from pathlib import Path, PurePosixPath
+from urllib.parse import quote, unquote, urlsplit
+
+PROG = "build-pages-site"
+
+TAG_PLACEHOLDER = "__LATEST_TAG__"
+# After the stamp, any token still shaped like a placeholder is one that was
+# misspelt or never substituted; it fails the build rather than going public.
+SURVIVOR_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
+TAG_RE = re.compile(r"v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?")
+DOC_SUFFIXES = (".html", ".md")
+
+# The five groups, in the order they are listed. The key is also the CSS class
+# that picks the group's accent colour.
+GROUPS = (
+    ("northstar", "Northstar"),
+    ("html", "HTML documents"),
+    ("specs", "Specifications and notes"),
+    ("ideas", "Ideas under consideration"),
+    ("contributing", "Contributing"),
+)
+
+# The shell's placeholders. A placeholder that starts its line captures the
+# line's indentation, which the substitution applies to every line of the value.
+PLACEHOLDERS = ("title", "intro", "groups", "root", "tag", "repo", "footer")
+PLACEHOLDER_RE = re.compile(r"(?:^([ \t]*))?\{\{([a-z]+)\}\}", re.MULTILINE)
+
+
+class BuildError(Exception):
+    """A condition that must fail the build, with a message for the log."""
+
+
+# --------------------------------------------------------------------------- #
+# The repository
+# --------------------------------------------------------------------------- #
+
+REMOTE_RE = re.compile(r"github\.com[:/](?P<owner>[^/:]+)/(?P<name>[^/]+?)(?:\.git)?/?$")
+
+
+@dataclass(frozen=True)
+class Repository:
+    root: Path
+    owner: str
+    name: str
+
+    @property
+    def github_url(self) -> str:
+        return f"https://github.com/{self.owner}/{self.name}"
+
+    @property
+    def docs_dir(self) -> Path:
+        return self.root / "docs"
+
+    @property
+    def site_dir(self) -> Path:
+        return self.root / "site"
+
+    @property
+    def intro_file(self) -> Path:
+        return self.site_dir / "intro.html"
+
+
+def git_output(root: Path, *args: str) -> str:
+    """Stdout of a git command run in root, or "" when it fails or git is absent."""
+    try:
+        result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+    except OSError:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def repository(root_arg: str) -> Repository:
+    root = Path(root_arg).resolve()
+    if not root.is_dir():
+        raise BuildError(f"--repo {root_arg}: not a directory")
+    m = REMOTE_RE.search(git_output(root, "remote", "get-url", "origin"))
+    if m:
+        return Repository(root, m["owner"], m["name"])
+    slug = os.environ.get("GITHUB_REPOSITORY", "")
+    if slug.count("/") == 1 and all(slug.split("/")):
+        owner, name = slug.split("/")
+        return Repository(root, owner, name)
+    raise BuildError(
+        "cannot tell which GitHub repository this is: no github.com origin remote "
+        "to read, and GITHUB_REPOSITORY is not set"
+    )
+
+
+def release_tag(explicit: str | None, root: Path) -> str:
+    if explicit is not None:
+        if not TAG_RE.fullmatch(explicit):
+            raise BuildError(f"--tag {explicit!r} is not a vX.Y.Z tag")
+        return explicit
+    tag = git_output(root, "describe", "--tags", "--abbrev=0", "--match", "v*")
+    if not tag:
+        raise BuildError(
+            "no v* tag reachable from HEAD (git describe --tags --abbrev=0 --match 'v*'); "
+            "refusing to publish a site with no release to pin to"
+        )
+    return tag
+
+
+# --------------------------------------------------------------------------- #
+# The documents
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Document:
+    rel: PurePosixPath  # path relative to docs/
+    kind: str  # "html" or "md"
+    title: str  # entities decoded; escaped again on output
+    description: str | None = None
+    twin: Document | None = None  # the Markdown twin of an HTML document
+
+    @property
+    def stem(self) -> str:
+        return self.rel.stem
+
+    @property
+    def sort_key(self) -> tuple[str, str]:
+        return (self.title.casefold(), str(self.rel))
+
+
+@dataclass
+class Folder:
+    rel: PurePosixPath  # relative to docs/; "." for docs/ itself
+    documents: list[Document] = field(default_factory=list)
+    subfolders: list[Folder] = field(default_factory=list)
+    has_own_index: bool = False  # the repository ships docs/<rel>/index.html
+
+    @property
+    def holds_documents(self) -> bool:
+        return bool(self.documents) or any(f.holds_documents for f in self.subfolders)
+
+
+class HeadScanner(HTMLParser):
+    """Collects an HTML document's <title> text and description meta."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title_parts: list[str] = []
+        self.description: str | None = None
+        self._in_title = False
+        self._done = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._done:
+            return
+        if tag == "title":
+            self._in_title = True
+        elif tag == "meta" and self.description is None:
+            a = dict(attrs)
+            if (a.get("name") or "").strip().lower() == "description" and a.get("content"):
+                self.description = normalise_ws(a["content"] or "")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
+        elif tag == "head":
+            self._done = True
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and not self._done:
+            self.title_parts.append(data)
+
+    @property
+    def title(self) -> str:
+        return normalise_ws("".join(self.title_parts))
+
+
+def normalise_ws(text: str) -> str:
+    return " ".join(text.split())
+
+
+def html_head(path: Path) -> tuple[str, str | None]:
+    scanner = HeadScanner()
+    scanner.feed(path.read_text(encoding="utf-8"))
+    scanner.close()
+    return scanner.title, scanner.description
+
+
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+H1_RE = re.compile(r"^ {0,3}#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
+
+
+def markdown_title(path: Path) -> str:
+    """The text of the first "# " heading, skipping fenced code blocks."""
+    fence: str | None = None
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            m = FENCE_RE.match(line)
+            if m:
+                marker = m.group(1)[0]
+                if fence is None:
+                    fence = marker
+                elif marker == fence:
+                    fence = None
+                continue
+            if fence:
+                continue
+            m = H1_RE.match(line)
+            if m:
+                return normalise_ws(m.group(1))
+    return ""
+
+
+def scan_folder(docs_dir: Path, rel: PurePosixPath, untitled: list[str]) -> Folder:
+    """Read the documents directly in docs/<rel>, pair twins, and recurse."""
+    folder = Folder(rel=rel)
+    here = docs_dir / rel
+    entries = sorted(here.iterdir(), key=lambda p: p.name)
+    by_name: dict[str, Document] = {}
+    for p in entries:
+        if not p.is_file() or p.suffix.lower() not in DOC_SUFFIXES:
+            continue
+        doc_rel = rel / p.name if str(rel) != "." else PurePosixPath(p.name)
+        if p.suffix.lower() == ".html":
+            title, description = html_head(p)
+            doc = Document(doc_rel, "html", title, description)
+        else:
+            doc = Document(doc_rel, "md", markdown_title(p))
+        if not doc.title:
+            untitled.append(str(doc_rel))
+        by_name[p.name] = doc
+    for doc in by_name.values():
+        if doc.kind == "html":
+            twin = by_name.get(doc.stem + ".md")
+            if twin is not None:
+                doc.twin = twin
+    twins = {id(d.twin) for d in by_name.values() if d.twin is not None}
+    folder.documents = [d for d in by_name.values() if id(d) not in twins]
+    folder.has_own_index = "index.html" in by_name
+    for p in entries:
+        if p.is_dir():
+            sub_rel = rel / p.name if str(rel) != "." else PurePosixPath(p.name)
+            sub = scan_folder(docs_dir, sub_rel, untitled)
+            if sub.holds_documents:
+                folder.subfolders.append(sub)
+    return folder
+
+
+def group_of(doc: Document) -> str:
+    if doc.kind == "html":
+        return "northstar" if doc.stem == "northstar" else "html"
+    # A Markdown document without an HTML twin.
+    if doc.stem == "northstar":
+        return "northstar"
+    if doc.stem.lower() == "contributing":
+        return "contributing"
+    if doc.stem.endswith("_ideas"):  # in-flight_ideas.md and every *_ideas.md
+        return "ideas"
+    return "specs"
+
+
+# --------------------------------------------------------------------------- #
+# The pages
+# --------------------------------------------------------------------------- #
+
+# The built-in shell: the palette of the handbook's docs/brand.md and the
+# component vocabulary of its templates/md-to-html/default.html (header bar
+# with the logo mark, hero, section label, cards, footer), on the system font
+# stacks. No font file, no script, no network request; one self-contained page
+# that collapses to a single column on a narrow screen.
+DEFAULT_SHELL = """<!DOCTYPE html>
+<!-- Generated by build-pages-site (ParkviewLab/dev-tools) at deploy time; not in the repository. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ParkviewLab · {{title}}</title>
+<meta name="description" content="The documentation of {{repo}}, as published in {{tag}}.">
+<style>
+/* ===========================================================================
+   ParkviewLab brand: the palette of the handbook's docs/brand.md and the
+   component vocabulary of templates/md-to-html/default.html, on the system
+   font stacks. No font file, no network request, one self-contained page.
+   =========================================================================== */
+:root {
+  --teal:#00C2C7; --teal-deep:#004f52; --sage:#90b095; --ink:#141414;
+  --red:#E2483D; --blue:#2547C8; --yellow:#F2B33D;
+  --paper:#f3eee2; --paper-2:#ece5d4; --card:#fbf8f1; --muted:#5d6258;
+  --code:#161412; --code-text:#ece5d4;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --display:var(--sans);
+}
+* { box-sizing:border-box; }
+body {
+  margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans);
+  line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+.wrap { max-width:960px; margin:0 auto; padding:0 24px 96px; }
+a { color:var(--teal-deep); text-decoration-color:var(--teal); }
+a:hover { color:var(--red); }
+code { font-family:var(--mono); font-size:.92em; background:var(--paper-2); padding:1px 5px; }
+
+/* ---- Header bar: logo mark + wordmark, linking to the site root ---- */
+header.site { border-bottom:3px solid var(--ink); padding:22px 0 18px; margin-bottom:44px; }
+header.site a { display:flex; align-items:center; gap:16px; text-decoration:none; }
+header.site .mark { height:54px; width:54px; flex:none; }
+header.site .word {
+  font-family:var(--display); text-transform:uppercase; letter-spacing:.12em;
+  font-size:15px; font-weight:600; color:var(--teal-deep); line-height:1.1;
+}
+header.site .word small { display:block; color:var(--muted); font-size:11px; letter-spacing:.22em; }
+
+/* ---- Hero: the page title, the accent rule, the introduction ---- */
+.hero { margin:8px 0 52px; }
+.hero h1 {
+  font-family:var(--display); font-size:32px; line-height:1.25; margin:0 0 16px;
+  color:var(--teal-deep); text-transform:uppercase; letter-spacing:.02em;
+}
+.hero .rule { height:6px; width:140px; background:var(--teal); margin:0 0 22px; }
+.intro { max-width:720px; }
+.intro p { font-size:17px; margin:0 0 14px; }
+
+/* ---- Section label ---- */
+.section-label {
+  font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:.14em;
+  color:var(--muted); margin:48px 0 18px; font-weight:600;
+  display:flex; align-items:center; gap:10px;
+}
+.section-label::before { content:""; width:12px; height:12px; background:var(--teal-deep); }
+.docs-lede { font-size:15px; color:var(--muted); max-width:720px; margin:0 0 24px; }
+
+/* ---- The document list: cards, the group's accent along the top ---- */
+.group { margin:0 0 36px; }
+.group h3 {
+  font-family:var(--display); font-size:14px; text-transform:uppercase; letter-spacing:.1em;
+  color:var(--ink); margin:0 0 14px;
+}
+.doclist { list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(2,1fr); gap:16px; }
+.doc {
+  position:relative; background:var(--card); border:2px solid var(--ink);
+  padding:22px 20px 18px; overflow:hidden;
+}
+.doc::before { content:""; position:absolute; top:0; left:0; width:100%; height:8px; background:var(--ac,var(--teal-deep)); }
+.doc-title { font-family:var(--display); font-size:16px; font-weight:600; color:var(--teal-deep); text-decoration:none; }
+.doc-title:hover { color:var(--red); }
+.doc-desc { font-size:14.5px; color:var(--muted); margin:8px 0 0; }
+.doc-meta {
+  font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+  color:var(--muted); margin:10px 0 0;
+}
+.doc-meta a { color:var(--muted); }
+.group.northstar { --ac:var(--teal-deep); }
+.group.html { --ac:#4f7d5a; }
+.group.specs { --ac:var(--blue); }
+.group.ideas { --ac:#c98a17; }
+.group.contributing, .group.folders { --ac:var(--muted); }
+
+/* ---- Footer ---- */
+footer.site {
+  margin-top:64px; border-top:3px solid var(--ink); padding-top:20px;
+  font-family:var(--mono); font-size:12px; color:var(--muted); letter-spacing:.03em;
+  display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap;
+}
+
+/* ---- Responsive collapse ---- */
+@media (max-width:680px) {
+  .doclist { grid-template-columns:1fr; }
+  .hero h1 { font-size:25px; }
+  header.site { padding:18px 0; margin-bottom:32px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="site">
+    <a href="{{root}}">
+      <!-- logo-only mark: pure shapes, no font dependency (see the handbook's docs/brand.md) -->
+      <svg class="mark" viewBox="60 115 170 170" role="img" aria-label="ParkviewLab" xmlns="http://www.w3.org/2000/svg">
+        <g transform="translate(200,200)">
+          <rect x="-88.572067" y="39.569824" width="9" height="28" fill="#90b095"/>
+          <circle cx="-83" cy="10" r="30" fill="#90b095"/>
+          <circle cx="-111" cy="20" r="22" fill="#90b095"/>
+          <circle cx="-55" cy="18" r="21" fill="#90b095"/>
+          <circle cx="-119" cy="4" r="16" fill="#90b095"/>
+          <circle cx="-47" cy="6" r="15" fill="#90b095"/>
+          <circle cx="-99" cy="-14" r="24" fill="#90b095"/>
+          <circle cx="-71" cy="-22" r="20" fill="#90b095"/>
+          <circle cx="-103" cy="-32" r="16" fill="#90b095"/>
+          <circle cx="-79" cy="-38" r="15" fill="#90b095"/>
+          <circle cx="-59" cy="-14" r="13" fill="#90b095"/>
+          <rect x="-5.820663" y="39.498325" width="6" height="22" fill="#90b095"/>
+          <circle cx="-2" cy="26" r="17" fill="#90b095"/>
+          <circle cx="-19" cy="29" r="13" fill="#90b095"/>
+          <circle cx="14" cy="27" r="12" fill="#90b095"/>
+          <circle cx="-11" cy="12" r="13" fill="#90b095"/>
+          <circle cx="7" cy="13" r="14" fill="#90b095"/>
+          <circle cx="-4.2837896" cy="-2.7139649" r="11" fill="#90b095"/>
+          <circle cx="6" cy="-2.14414" r="7" fill="#90b095"/>
+          <g transform="matrix(0.84873049,0,0,0.84873049,-48.542203,6.0416091)">
+            <path d="m -16,-78 a 28,28 0 0 1 32,0" fill="none" stroke="#00C2C7" stroke-width="4" stroke-linecap="square"/>
+            <path d="m -28,-88 a 46,46 0 0 1 56,0" fill="none" stroke="#00C2C7" stroke-width="2.5" stroke-linecap="square"/>
+            <polyline points="0,-28 0,-36 0,-62" fill="none" stroke="#00C2C7" stroke-width="6" stroke-linecap="square" stroke-linejoin="miter"/>
+            <polyline points="24,-14 32,-22 53.7,-28" fill="none" stroke="#00C2C7" stroke-width="6" stroke-linecap="square" stroke-linejoin="miter"/>
+            <polyline points="-24,-14 -32,-22 -53.7,-28" fill="none" stroke="#00C2C7" stroke-width="6" stroke-linecap="square" stroke-linejoin="miter"/>
+            <polyline points="0,28 0,35 0,56" fill="none" stroke="#00C2C7" stroke-width="4.5" stroke-linecap="square" stroke-linejoin="miter"/>
+            <polyline points="24,14 30,20 46,28" fill="none" stroke="#00C2C7" stroke-width="4.5" stroke-linecap="square" stroke-linejoin="miter"/>
+            <polyline points="-24,14 -30,20 -46,28" fill="none" stroke="#00C2C7" stroke-width="4.5" stroke-linecap="square" stroke-linejoin="miter"/>
+            <circle cx="0" cy="-62" r="11" fill="#00C2C7"/><circle cx="0" cy="-62" r="5" fill="#004f52"/>
+            <circle cx="53.7" cy="-31" r="11" fill="#00C2C7"/><circle cx="53.7" cy="-31" r="5" fill="#004f52"/>
+            <circle cx="-53.7" cy="-31" r="11" fill="#00C2C7"/><circle cx="-53.7" cy="-31" r="5" fill="#004f52"/>
+            <circle cx="0" cy="56" r="9" fill="#00C2C7"/><circle cx="0" cy="56" r="4" fill="#004f52"/>
+            <circle cx="46" cy="28" r="9" fill="#00C2C7"/><circle cx="46" cy="28" r="4" fill="#004f52"/>
+            <circle cx="-46" cy="28" r="9" fill="#00C2C7"/><circle cx="-46" cy="28" r="4" fill="#004f52"/>
+            <polygon points="0,-28 24,-14 24,14 0,28 -24,14 -24,-14" fill="#00C2C7"/>
+            <polygon points="0,-23 20,-11.5 20,11.5 0,23 -20,11.5 -20,-11.5" fill="#004f52"/>
+            <line x1="0" y1="-23" x2="0" y2="23" stroke="#00C2C7" stroke-width="3" stroke-linecap="square"/>
+          </g>
+        </g>
+      </svg>
+      <span class="word">ParkviewLab<small>{{repo}}</small></span>
+    </a>
+  </header>
+
+  <div class="hero">
+    <h1>{{title}}</h1>
+    <div class="rule"></div>
+    <div class="intro">
+      {{intro}}
+    </div>
+  </div>
+
+  <div class="section-label">documents · {{tag}}</div>
+  <p class="docs-lede">HTML documents open here; Markdown documents open in GitHub's rendered view at {{tag}}.</p>
+  {{groups}}
+
+  <footer class="site">
+    {{footer}}
+  </footer>
+
+</div>
+</body>
+</html>
+"""
+
+
+@dataclass(frozen=True)
+class Shell:
+    text: str
+    path: Path | None  # None for the built-in default
+
+    @property
+    def label(self) -> str:
+        return str(self.path) if self.path is not None else "the built-in shell"
+
+
+def load_shell(arg: str | None) -> Shell:
+    if arg is None:
+        shell = Shell(DEFAULT_SHELL, None)
+    else:
+        path = Path(arg)
+        if not path.is_file():
+            raise BuildError(f"--shell {arg}: no such file")
+        shell = Shell(path.read_text(encoding="utf-8"), path.resolve())
+    names = {m.group(2) for m in PLACEHOLDER_RE.finditer(shell.text)}
+    unknown = sorted(names - set(PLACEHOLDERS))
+    if unknown:
+        raise BuildError(
+            f"{shell.label}: unknown placeholder {', '.join('{{' + n + '}}' for n in unknown)}; "
+            f"the set is {', '.join('{{' + n + '}}' for n in PLACEHOLDERS)}"
+        )
+    if "groups" not in names:
+        raise BuildError(f"{shell.label} has no {{{{groups}}}} placeholder; the document list has nowhere to go")
+    return shell
+
+
+def fill(shell: Shell, values: dict[str, str]) -> str:
+    """The shell with its placeholders substituted, each indented to its line."""
+
+    def replace(m: re.Match[str]) -> str:
+        indent, name = m.group(1), m.group(2)
+        value = values[name]
+        return value if indent is None else textwrap.indent(value, indent)
+
+    return PLACEHOLDER_RE.sub(replace, shell.text)
+
+
+def esc(text: str) -> str:
+    return html.escape(text, quote=True)
+
+
+def github_blob(repo: Repository, tag: str, rel: PurePosixPath) -> str:
+    return f"{repo.github_url}/blob/{tag}/docs/{quote(str(rel), safe='/')}"
+
+
+def render_document(doc: Document, repo: Repository, tag: str, page_dir: str) -> str:
+    """One card. page_dir is the page's folder relative to the site root."""
+    if doc.kind == "html":
+        href = posixpath.relpath(f"docs/{doc.rel}", page_dir)
+    else:
+        href = github_blob(repo, tag, doc.rel)
+    lines = [f'  <li class="doc"><a class="doc-title" href="{esc(href)}">{esc(doc.title)}</a>']
+    if doc.description:
+        lines.append(f'    <p class="doc-desc">{esc(doc.description)}</p>')
+    if doc.kind == "md":
+        lines.append('    <p class="doc-meta">Markdown · rendered on GitHub</p>')
+    elif doc.twin is not None:
+        src = github_blob(repo, tag, doc.twin.rel)
+        lines.append(f'    <p class="doc-meta"><a href="{esc(src)}">Markdown source</a></p>')
+    lines.append("  </li>")
+    return "\n".join(lines)
+
+
+def render_groups(folder: Folder, repo: Repository, tag: str, page_dir: str) -> tuple[str, dict[str, int]]:
+    """The group sections for one folder, and a count of documents per group."""
+    grouped: dict[str, list[Document]] = {key: [] for key, _ in GROUPS}
+    for doc in folder.documents:
+        grouped[group_of(doc)].append(doc)
+    counts = {key: len(docs) for key, docs in grouped.items()}
+    sections: list[str] = []
+    for key, heading in GROUPS:
+        docs = sorted(grouped[key], key=lambda d: d.sort_key)
+        if not docs:
+            continue
+        cards = "\n".join(render_document(d, repo, tag, page_dir) for d in docs)
+        sections.append(
+            f'<div class="group {key}">\n  <h3>{esc(heading)}</h3>\n'
+            f'  <ul class="doclist">\n{cards}\n  </ul>\n</div>'
+        )
+    if folder.subfolders:
+        cards = []
+        for sub in sorted(folder.subfolders, key=lambda f: str(f.rel).casefold()):
+            href = posixpath.relpath(f"docs/{sub.rel}", page_dir) + "/"
+            cards.append(f'  <li class="doc"><a class="doc-title" href="{esc(href)}">{esc(sub.rel.name)}/</a></li>')
+        sections.append(
+            '<div class="group folders">\n  <h3>Folders</h3>\n'
+            '  <ul class="doclist">\n' + "\n".join(cards) + "\n  </ul>\n</div>"
+        )
+    return "\n".join(sections), counts
+
+
+LEADING_COMMENTS_RE = re.compile(r"\A(?:\s*<!--.*?-->)*\s*", re.DOTALL)
+
+
+def read_intro(repo: Repository) -> str:
+    """site/intro.html without its leading comments; "" when there is none."""
+    if not repo.intro_file.is_file():
+        return ""
+    text = LEADING_COMMENTS_RE.sub("", repo.intro_file.read_text(encoding="utf-8")).rstrip()
+    if not text:
+        raise BuildError("site/intro.html holds no introduction; delete it to publish without one")
+    return text
+
+
+def render_footer(repo: Repository, tag: str) -> str:
+    return (
+        f'<span>Published from <a href="{esc(repo.github_url)}/tree/{esc(tag)}">{esc(tag)}</a></span>\n'
+        f'<span><a href="{esc(repo.github_url)}">{esc(repo.owner)}/{esc(repo.name)} on GitHub</a></span>'
+    )
+
+
+def render_page(
+    shell: Shell, repo: Repository, tag: str, folder: Folder, intro: str
+) -> tuple[str, dict[str, int]]:
+    """The root index (folder.rel == ".") or a folder index, and its group counts."""
+    if str(folder.rel) == ".":
+        title, root, page_dir = repo.name, "", "."
+    else:
+        title = f"{repo.name} · docs/{folder.rel}"
+        root = "../" * (len(folder.rel.parts) + 1)
+        page_dir = f"docs/{folder.rel}"
+    groups, counts = render_groups(folder, repo, tag, page_dir)
+    values = {
+        "title": esc(title),
+        "intro": intro,
+        "groups": groups,
+        "root": root,
+        "tag": esc(tag),
+        "repo": esc(repo.name),
+        "footer": render_footer(repo, tag),
+    }
+    return fill(shell, values), counts
+
+
+# --------------------------------------------------------------------------- #
+# The link check
+# --------------------------------------------------------------------------- #
+
+SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+CSS_URL_RE = re.compile(r"""url\(\s*(['"]?)([^'")\s]+)\1\s*\)""")
+
+
+class RefCollector(HTMLParser):
+    """Collects every href and src attribute, and every url() inside <style>."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.refs: list[tuple[str, int]] = []
+        self._in_style = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        line = self.getpos()[0]
+        for name, value in attrs:
+            if name in ("href", "src") and value is not None:
+                self.refs.append((value.strip(), line))
+        if tag == "style":
+            self._in_style = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "style":
+            self._in_style = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_style:
+            line = self.getpos()[0]
+            for m in CSS_URL_RE.finditer(data):
+                self.refs.append((m.group(2), line + data[: m.start()].count("\n")))
+
+
+def is_local(ref: str) -> bool:
+    """Whether a reference addresses a file of ours, rather than somewhere else."""
+    if not ref or ref.startswith(("#", "//")) or SCHEME_RE.match(ref):
+        return False  # a fragment, a protocol-relative or an absolute URL: not ours
+    return bool(unquote(urlsplit(ref).path))  # false for a bare query or fragment
+
+
+def unresolved(ref: str, page: Path, out: Path, repo_name: str) -> str | None:
+    """Why a reference does not resolve to a file in out, or None if it does."""
+    if not is_local(ref):
+        return None
+    path = unquote(urlsplit(ref).path)
+    if path.startswith("/"):
+        return f"root-relative; the site lives under /{repo_name}/, so every reference must be relative"
+    target = (page.parent / path).resolve()
+    try:
+        target.relative_to(out)
+    except ValueError:
+        return "resolves outside the site"
+    if path.endswith("/") or target.is_dir():
+        return None if (target / "index.html").is_file() else "no index.html in that folder"
+    return None if target.is_file() else "no such file"
+
+
+def check_links(pages: list[Path], out: Path, repo_name: str) -> tuple[int, list[str]]:
+    """Resolve every local reference in the pages; returns (checked, problems)."""
+    checked = 0
+    problems: list[str] = []
+    for page in pages:
+        collector = RefCollector()
+        collector.feed(page.read_text(encoding="utf-8"))
+        collector.close()
+        for ref, line in collector.refs:
+            if not is_local(ref):
+                continue
+            checked += 1
+            why = unresolved(ref, page, out, repo_name)
+            if why is not None:
+                problems.append(f"{page.relative_to(out)}:{line}: {ref!r}: {why}")
+    return checked, problems
+
+
+def copied_documents(out: Path, generated: list[Path]) -> list[Path]:
+    """The HTML documents copied from docs/, excluding the pages written here."""
+    written = {p.resolve() for p in generated}
+    return sorted(p for p in (out / "docs").rglob("*.html") if p.resolve() not in written)
+
+
+# --------------------------------------------------------------------------- #
+# The build
+# --------------------------------------------------------------------------- #
+
+
+def prepare_out(out_arg: str, repo: Repository) -> Path:
+    out = Path(out_arg).resolve()
+    for guarded in (repo.site_dir, repo.docs_dir):
+        if out == guarded or guarded in out.parents:
+            raise BuildError(f"--out must not be inside {guarded.relative_to(repo.root)}/")
+    if out.exists():
+        if not out.is_dir():
+            raise BuildError(f"--out {out} is not a directory")
+        if any(out.iterdir()):
+            raise BuildError(f"--out {out} is not empty; pass a new or empty directory")
+    else:
+        out.mkdir(parents=True)
+    return out
+
+
+def ignore_dot_entries(directory: str, names: list[str]) -> set[str]:
+    return {n for n in names if n == ".DS_Store"}
+
+
+def copy_site(repo: Repository, out: Path, shell: Shell) -> list[str]:
+    """Copy site/ into out, leaving out the intro and the shell; the names left out."""
+    excluded = {repo.intro_file.resolve()}
+    if shell.path is not None:
+        excluded.add(shell.path)
+    left_out: list[str] = []
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        ignored = ignore_dot_entries(directory, names)
+        here = Path(directory).resolve()
+        for n in names:
+            if here / n in excluded:
+                ignored.add(n)
+                left_out.append(str((here / n).relative_to(repo.site_dir.resolve())))
+        return ignored
+
+    if (repo.site_dir / "docs").exists():
+        raise BuildError("site/docs/ would collide with the published docs/; hand-built pages go in other folders")
+    if (repo.site_dir / "index.html").exists():
+        raise BuildError("site/index.html would be overwritten by the generated index; the root page is the shell")
+    shutil.copytree(repo.site_dir, out, ignore=ignore, dirs_exist_ok=True)
+    return left_out
+
+
+def stamp_pages(out: Path, tag: str) -> list[Path]:
+    """Substitute the release tag into every hand-built page copied from site/."""
+    pages = sorted(p for p in out.rglob("*") if p.is_file() and p.suffix.lower() == ".html")
+    for page in pages:
+        try:
+            with page.open(encoding="utf-8", newline="") as f:
+                text = f.read()
+        except UnicodeDecodeError as e:
+            raise BuildError(f"{page.relative_to(out)} is not UTF-8: {e}") from None
+        text = text.replace(TAG_PLACEHOLDER, tag)
+        survivors = [f"{page.relative_to(out)}:{text.count(chr(10), 0, m.start()) + 1}: {m.group()}" for m in SURVIVOR_RE.finditer(text)]
+        if survivors:
+            raise BuildError(
+                f"placeholders survived the stamp (the build substitutes {TAG_PLACEHOLDER} only):\n    "
+                + "\n    ".join(survivors)
+            )
+        with page.open("w", encoding="utf-8", newline="") as f:
+            f.write(text)
+    return pages
+
+
+def count_files(root: Path) -> int:
+    return sum(1 for p in root.rglob("*") if p.is_file())
+
+
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def build(repo: Repository, out: Path, tag: str, shell: Shell) -> None:
+    print(f"{PROG}: {repo.owner}/{repo.name}, release tag {tag}")
+    if not repo.docs_dir.is_dir():
+        raise BuildError("no docs/ directory; nothing to publish")
+
+    pages: list[Path] = []
+    if repo.site_dir.is_dir():
+        left_out = copy_site(repo, out, shell)
+        pages = stamp_pages(out, tag)
+        without = f" (without {', '.join(left_out)})" if left_out else ""
+        print(f"  copied site/{without}")
+        if pages:
+            names = ", ".join(str(p.relative_to(out)) for p in pages)
+            print(f"  stamped {tag} into {plural(len(pages), 'hand-built page')}: {names}")
+    else:
+        print("  no site/ directory; publishing docs/ alone")
+    shutil.copytree(repo.docs_dir, out / "docs", ignore=ignore_dot_entries)
+    print(f"  copied docs/ ({plural(count_files(out / 'docs'), 'file')})")
+
+    untitled: list[str] = []
+    root_folder = scan_folder(out / "docs", PurePosixPath("."), untitled)
+    if untitled:
+        raise BuildError("documents without a title:\n    " + "\n    ".join(untitled))
+
+    intro = read_intro(repo)
+    page, counts = render_page(shell, repo, tag, root_folder, intro)
+    (out / "index.html").write_text(page, encoding="utf-8")
+    pages.append(out / "index.html")
+    summary = ", ".join(f"{key} {counts[key]}" for key, _ in GROUPS)
+    intro_note = "" if intro else ", no introduction"
+    print(f"  wrote index.html: {plural(len(root_folder.documents), 'document')} ({summary}){intro_note}")
+
+    pending = list(root_folder.subfolders)
+    while pending:
+        folder = pending.pop(0)
+        pending.extend(folder.subfolders)
+        if folder.has_own_index:
+            print(f"  docs/{folder.rel}/index.html ships in the repository; not generated")
+            continue
+        page, counts = render_page(shell, repo, tag, folder, "")
+        target = out / "docs" / folder.rel / "index.html"
+        target.write_text(page, encoding="utf-8")
+        pages.append(target)
+        print(f"  wrote docs/{folder.rel}/index.html: {plural(len(folder.documents), 'document')}")
+
+    checked, problems = check_links(pages, out, repo.name)
+    if problems:
+        raise BuildError("unresolved references:\n    " + "\n    ".join(problems))
+    print(
+        f"  link check: {plural(checked, 'local reference')} "
+        f"in {plural(len(pages), 'generated or stamped page')}, all resolve"
+    )
+
+    copied = copied_documents(out, pages)
+    if copied:
+        _, reported = check_links(copied, out, repo.name)
+        for problem in reported:
+            print(f"  warning: {problem}")
+        verdict = "all resolve" if not reported else f"{len(reported)} unresolved, published as they are"
+        print(f"  docs/ link check: {plural(len(copied), 'copied HTML document')}, {verdict}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog=PROG, description="Build a repository's GitHub Pages documentation site into a directory."
+    )
+    parser.add_argument("--out", required=True, metavar="DIR", help="a new or empty directory to build into")
+    parser.add_argument(
+        "--tag", metavar="vX.Y.Z", help="the release tag to pin to (default: newest v* tag reachable from HEAD)"
+    )
+    parser.add_argument(
+        "--shell", metavar="FILE", help="the page shell, an HTML file with {{placeholders}} (default: built in)"
+    )
+    parser.add_argument("--repo", metavar="DIR", default=".", help="the repository to build (default: .)")
+    args = parser.parse_args(argv)
+    try:
+        repo = repository(args.repo)
+        shell = load_shell(args.shell)
+        out = prepare_out(args.out, repo)
+        build(repo, out, release_tag(args.tag, repo.root), shell)
+    except BuildError as e:
+        print(f"{PROG}: error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
