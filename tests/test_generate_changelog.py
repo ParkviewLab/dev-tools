@@ -1046,7 +1046,7 @@ class HighlightsCallTests(Fixture):
 
     def test_a_successful_call(self) -> None:
         stub = StubAnthropic(answer("  A paragraph about greeting people by name.  "))
-        code, out, _ = self.call(stub)
+        code, _, _ = self.call(stub)
         self.assertEqual(code, 0)
         self.assertEqual(self.paragraph(), "A paragraph about greeting people by name.")
         self.assertEqual(len(stub.calls), 1)
@@ -1140,7 +1140,7 @@ class CommandLineTests(Fixture):
         elsewhere = self.tmp / "elsewhere"
         elsewhere.mkdir()
         with contextlib.chdir(elsewhere):
-            code, out, err = self.run_main("--mode=generate", *self.args)
+            code, _, err = self.run_main("--mode=generate", *self.args)
         self.assertEqual(code, 0, err)
         self.assertFalse((elsewhere / "release-body.md").exists())
         self.assertTrue(self.body().startswith("## [v0.1.0] - 2026-"))
