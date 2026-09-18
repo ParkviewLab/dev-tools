@@ -114,14 +114,19 @@ requests, with each one's number, title, body, base and head branch, head
 repository and merge commit. If that read fails, the run fails and names the
 cause: a list built without it would be wrong without saying so.
 
-The Highlights paragraph is written by claude-opus-5 from the entries the list
-holds: the title and body of every listed pull request, as GitHub records them,
-and the subject and body of every direct commit. The input is capped at 50,000
-characters; every entry's title or subject goes in first and the bodies share
-what remains, each shortened as needed, so that no entry is lost to the cap.
-A missing ANTHROPIC_API_KEY, a failed call, a refusal or an empty answer gives
-the marked placeholder, and the release ships. The anthropic SDK is imported
-inside that call alone, so everything else needs the standard library only.
+The Highlights paragraph, two to four sentences as the prompt asks, is written
+by claude-opus-5 from the entries the list holds: the title and body of every
+listed pull request, as GitHub records them, and the subject and body of every
+direct commit. Every entry's title or subject goes in first and is never
+shortened, so that no entry is lost to the input's cap of 50,000 characters;
+the bodies share what remains, each shortened as needed and marked
+[shortened], or left out when its share cannot hold the mark and some of its
+text. When the titles and subjects alone exceed the cap, they are all sent,
+without bodies, and the input exceeds it. A missing ANTHROPIC_API_KEY, a
+failed call, a refusal, an empty answer or a stop at max_tokens gives the
+marked placeholder, and the release ships; a warning in the job summary names
+the cause. The anthropic SDK is imported inside that call alone, so everything
+else, the tests included, needs the standard library only.
 
 The job summary
 ---------------
@@ -163,9 +168,6 @@ PROG = "generate-changelog"
 HIGHLIGHTS_MODEL = "claude-opus-5"
 HIGHLIGHTS_EFFORT = "high"
 HIGHLIGHTS_MAX_TOKENS = 16_000
-# Server-side refusal fallbacks: a declined request is re-run on Anthropic's
-# recommended fallback model inside the same call.
-HIGHLIGHTS_BETA = "server-side-fallback-2026-07-01"
 MAX_INPUT_CHARS = 50_000
 SHORTENED = " [shortened]"
 PLACEHOLDER = "_Highlights were not generated for this release._"
@@ -1054,8 +1056,6 @@ def highlights(prompt: str, warnings: list[str]) -> tuple[str, str]:
             model=HIGHLIGHTS_MODEL,
             max_tokens=HIGHLIGHTS_MAX_TOKENS,
             output_config={"effort": HIGHLIGHTS_EFFORT},
-            betas=[HIGHLIGHTS_BETA],
-            fallbacks="default",
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:  # any failure of the call: the placeholder, and the release ships
@@ -1073,16 +1073,17 @@ def highlights(prompt: str, warnings: list[str]) -> tuple[str, str]:
         getattr(block, "text", "") for block in (getattr(response, "content", None) or [])
         if getattr(block, "type", None) == "text"
     ).strip()
-    if stop == "max_tokens":
+    if stop == "max_tokens":  # a paragraph cut off at the cap is never published
         warnings.append(
             f"the Highlights call stopped at max_tokens ({HIGHLIGHTS_MAX_TOKENS}); "
-            + ("the paragraph may be cut short" if text else "it returned no text, so the placeholder is used")
+            + ("its paragraph was cut short" if text else "it returned no text")
+            + ", so the placeholder is used"
         )
-    elif stop not in ("end_turn", "stop_sequence"):
+        return PLACEHOLDER, "the placeholder"
+    if stop not in ("end_turn", "stop_sequence"):
         warnings.append(f"the Highlights call stopped with stop_reason {stop}")
     if not text:
-        if stop != "max_tokens":
-            warnings.append("the Highlights call returned no text; the placeholder is used")
+        warnings.append("the Highlights call returned no text; the placeholder is used")
         return PLACEHOLDER, "the placeholder"
     return text, str(getattr(response, "model", None) or HIGHLIGHTS_MODEL)
 

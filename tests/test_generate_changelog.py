@@ -1054,8 +1054,8 @@ class HighlightsCallTests(Fixture):
         self.assertEqual(call["model"], "claude-opus-5")
         self.assertEqual(call["max_tokens"], 16_000)
         self.assertEqual(call["output_config"], {"effort": "high"})
-        self.assertEqual(call["betas"], ["server-side-fallback-2026-07-01"])
-        self.assertEqual(call["fallbacks"], "default")
+        self.assertNotIn("fallbacks", call)
+        self.assertNotIn("betas", call)
         self.assertNotIn("thinking", call)
         prompt = call["messages"][0]["content"]
         self.assertIn("Project: synth-app — A synthetic app", prompt)
@@ -1087,12 +1087,18 @@ class HighlightsCallTests(Fixture):
         self.assertEqual(self.paragraph(), gc.PLACEHOLDER)
         self.assertIn("the anthropic SDK cannot be imported", self.summary.read_text(encoding="utf-8"))
 
-    def test_a_stop_at_max_tokens_writes_a_warning_to_the_job_summary(self) -> None:
+    def test_a_stop_at_max_tokens_gives_the_placeholder_and_a_warning(self) -> None:
         code, _, _ = self.call(StubAnthropic(answer("A paragraph that ran", stop="max_tokens")))
         self.assertEqual(code, 0)
-        self.assertEqual(self.paragraph(), "A paragraph that ran")
+        self.assertEqual(self.paragraph(), gc.PLACEHOLDER)
+        self.assertNotIn("A paragraph that ran", self.body())  # a cut-off answer is never published
         summary = self.summary.read_text(encoding="utf-8")
-        self.assertIn("- the Highlights call stopped at max_tokens (16000); the paragraph may be cut short", summary)
+        self.assertIn(
+            "- the Highlights call stopped at max_tokens (16000); its paragraph was cut short, "
+            "so the placeholder is used",
+            summary,
+        )
+        self.assertIn("- Highlights: the placeholder", summary)
         self.assertNotIn("max_tokens", self.body())  # warnings never enter the notes
 
     def test_a_stop_at_max_tokens_with_no_text_gives_the_placeholder(self) -> None:
@@ -1111,13 +1117,6 @@ class HighlightsCallTests(Fixture):
         self.call(StubAnthropic(answer("   ")))
         self.assertEqual(self.paragraph(), gc.PLACEHOLDER)
         self.assertIn("returned no text", self.summary.read_text(encoding="utf-8"))
-
-    def test_a_fallback_block_is_not_read_as_text(self) -> None:
-        response = answer("Written by the fallback model.", model="claude-opus-4-8")
-        response.content.insert(0, types.SimpleNamespace(type="fallback", text="not text"))
-        self.call(StubAnthropic(response))
-        self.assertEqual(self.paragraph(), "Written by the fallback model.")
-        self.assertIn("- Highlights: claude-opus-4-8", self.summary.read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- #

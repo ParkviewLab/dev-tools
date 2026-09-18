@@ -191,7 +191,7 @@ The one read from GitHub is the repository's merged pull requests, through `gh`:
 
 ### The Highlights paragraph
 
-`claude-opus-5` writes two to four sentences from the entries the list holds: the title and body of every listed pull request, as GitHub records them, and the subject and body of every direct commit. The input is capped at 50,000 characters, with every title first and the bodies shortened to share what remains, so no entry is lost to the cap. The key is `ANTHROPIC_API_KEY`. Without it, or when the call fails, is refused or answers nothing, the paragraph is a marked placeholder and the release ships; a call that stops at its output cap keeps its text and leaves a warning in the job summary. The `anthropic` SDK is imported inside that call alone, so everything else, the tests included, needs the standard library only.
+`claude-opus-5` writes two to four sentences from the entries the list holds: the title and body of every listed pull request, as GitHub records them, and the subject and body of every direct commit. The input is capped at 50,000 characters, with every title first and the bodies shortened to share what remains, so no entry is lost to the cap. The key is `ANTHROPIC_API_KEY`. Without it, or when the call fails, is refused, answers nothing or stops at its output cap, the paragraph is a marked placeholder and the release ships; a warning in the job summary names the cause. The `anthropic` SDK is imported inside that call alone, so everything else, the tests included, needs the standard library only.
 
 ### The job summary
 
