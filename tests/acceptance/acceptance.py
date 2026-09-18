@@ -266,6 +266,13 @@ def listed_numbers(listing: str) -> list[int]:
     return sorted(numbers)
 
 
+def unspan(text: str) -> str:
+    """The text inside a Markdown code span that makes up the whole of text, as the
+    script writes a warning into its report; any other text as it is."""
+    m = re.fullmatch(r"(`+) (.*) \1", text)
+    return m[2] if m else text
+
+
 def summary_block(stdout: str, title: str) -> list[str]:
     """The lines under "### <title>" in the script's printed report."""
     lines, on = [], False
@@ -304,7 +311,9 @@ def check_tag(clone: Path, repo: str, tag: str, record: dict | None, prs: dict[i
     if result.returncode != 0:
         return TagResult(repo, tag, "script", False, detail=f"the script exited {result.returncode}:\n{result.stderr.strip()}")
     _, listing = split_section(result.body)
-    warnings = [w for w in summary_block(result.stdout, "Warnings") if not w.startswith("ANTHROPIC_API_KEY is not set")]
+    warnings = [
+        w for w in map(unspan, summary_block(result.stdout, "Warnings")) if not w.startswith("ANTHROPIC_API_KEY is not set")
+    ]
     out = TagResult(repo, tag, "", False, listing=listing, warnings=warnings, seconds=result.seconds)
     if (repo, tag) in RULED:
         want, ruling = RULED[(repo, tag)]
