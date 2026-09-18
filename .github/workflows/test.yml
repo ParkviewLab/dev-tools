@@ -4,8 +4,8 @@ name: Test
 # standard-library unittest on Python 3.13, with nothing installed. The
 # changelog script imports the anthropic SDK only inside its Highlights call,
 # which its tests stub, so they need no package and no network; the acceptance
-# run in tests/acceptance/ needs both and is not run here. See the handbook's
-# ci.md.
+# run in tests/acceptance/ needs the network and gh logged in to GitHub, and
+# is not run here. See the handbook's ci.md.
 
 on:
   pull_request:
