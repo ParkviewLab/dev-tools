@@ -612,6 +612,133 @@ class PickTests(Fixture):
         self.assertEqual(self.groups(later), {})
         self.assertEqual(self.kept_out(later), ([], [3]))
 
+    def test_a_squash_that_reapplies_a_reverted_squash_is_listed(self) -> None:
+        # Squash merging: GitHub's Revert button on #5 gives #6, and on #6 gives #7; each is
+        # its own pull request's squash commit, so #7 is listed in the release that ships it.
+        r = self.repo
+        self.squash(5, "feat: widget", {"w.py": "W = 1\n"})
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.git("rm", "-q", "w.py")
+        s6 = r.commit('Revert "feat: widget" (#6)\n\n* Revert "feat: widget"', DEV, GH)
+        self.prs.append(rest_pr(6, 'Revert "feat: widget"', s6))
+        self.squash(7, 'Revert "Revert "feat: widget""', {"w.py": "W = 1\n"})
+        self.promote("v0.3.0")
+        result = self.build("v0.3.0")
+        self.assertEqual(self.groups(result), {"Other changes": [6, 7]})
+        self.assertEqual(self.kept_out(result), ([], []))
+
+    def test_a_direct_commit_that_a_later_pull_request_redoes_is_not_its_pick(self) -> None:
+        # D6: a copy cannot precede what it copies. A commit pushed straight to develop,
+        # released, reverted, and redone by a pull request is not a pick of that pull request.
+        r = self.repo
+        r.write("w.py", "widget\n")
+        x = r.commit("feat: add the widget")
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.git("revert", "--no-edit", x)
+        self.squash(7, "feat: add the widget", {"w.py": "widget\n"})
+        self.promote("v0.3.0")
+        early = self.build("v0.2.0")
+        self.assertEqual(self.groups(early), {})
+        self.assertEqual(self.direct(early), ["feat: add the widget"])
+        later = self.build("v0.3.0")
+        self.assertEqual(self.groups(later), {"Features": [7]})
+        self.assertEqual(self.kept_out(later), ([], []))
+        self.assertEqual(self.direct(later), ['Revert "feat: add the widget"'])
+
+    def test_a_real_merge_that_redoes_an_earlier_direct_commit_is_listed(self) -> None:
+        # D6 and D8: the direct commit is not a pick of #7's merge, and it is not a copy of
+        # #7's own commit, which descends from it.
+        r = self.repo
+        r.write("w.py", "widget\n")
+        x = r.commit("feat: add the widget")
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.git("revert", "--no-edit", x)
+        self.branch_commits("widget", [("widget: add it", {"w.py": "widget\n"})])
+        self.real_merge(7, "feat: add the widget", "widget", "develop")
+        self.promote("v0.3.0")
+        later = self.build("v0.3.0")
+        self.assertEqual(self.groups(later), {"Features": [7]})
+        self.assertEqual(self.kept_out(later), ([], []))
+
+    def test_a_real_merge_that_reapplies_one_reverted_commit_is_listed(self) -> None:
+        # D6: #7's merge has the patch-id of #5's first commit, which the merge's first parent
+        # already holds, so that commit is not taken for a pick of #7 and does not ship #7.
+        r = self.repo
+        c5a, _ = self.branch_commits("widget", [("add widget", {"w.py": "W = 1\n"}),
+                                                ("add gadget", {"g.py": "G = 1\n"})])
+        self.real_merge(5, "feat: widget and gadget", "widget", "develop")
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.checkout("revert-widget", new=True)
+        r.git("revert", "--no-edit", c5a)
+        self.real_merge(6, "revert: widget", "revert-widget", "develop")
+        r.checkout("reapply-widget", new=True)
+        r.git("revert", "--no-edit", r.git("rev-parse", "revert-widget"))
+        self.real_merge(7, "feat: widget again", "reapply-widget", "develop")
+        self.promote("v0.3.0")
+        result = self.build("v0.3.0")
+        self.assertEqual(self.groups(result), {"Features": [7], "Reverts": [6]})
+        self.assertEqual(self.kept_out(result), ([], []))
+
+    def test_a_branch_merged_by_hand_into_main_and_by_pull_request_into_develop_is_listed_once(self) -> None:
+        # D6: the merge's own commit, reached only through its second parent, is not a copy
+        # that precedes it, so it stays the pull request's.
+        r = self.repo
+        r.checkout("main")
+        self.branch_commits("fix-x", [("fix: x", {"x.py": "fixed\n"})])
+        self.real_merge(2, "fix: x", "fix-x", "develop")
+        r.checkout("main")
+        r.merge("fix-x", "Merge branch 'fix-x' into main")
+        r.tag("v0.1.1")
+        hotfix = self.build("v0.1.1")
+        self.assertEqual(self.groups(hotfix), {"Bug fixes": [2]})
+        self.assertEqual(self.direct(hotfix), [])
+        self.promote("v0.2.0")
+        later = self.build("v0.2.0")
+        self.assertEqual(self.groups(later), {})
+        self.assertEqual(self.kept_out(later), ([], [2]))
+
+    def test_every_pick_onto_the_release_line_is_listed_once(self) -> None:
+        # Ruling 9b, with D6 and D8 narrowed: a copy made on the release line is never in the
+        # history of what it copies, so each pull request picked there, in every way a pick
+        # is made, is listed in the hotfix and left out when the promotion ships it.
+        r = self.repo
+        s11 = self.squash(11, "fix: squash picked by patch-id", {"p11.txt": "11\n"})
+        s12 = self.squash(12, "fix: squash picked with its trailer", {"p12.txt": "12\n"})
+        self.branch_commits("b2", [("two: first", {"p2a.txt": "2\n"}), ("two: second", {"p2b.txt": "2\n"})])
+        m2 = self.real_merge(2, "fix: merge picked with -m 1", "b2", "develop")
+        self.branch_commits("b4", [("four: first", {"p4a.txt": "4\n"}), ("four: second", {"p4b.txt": "4\n"})])
+        m4 = self.real_merge(4, "fix: merge picked with -x -m 1", "b4", "develop")
+        e3a, e3b = self.branch_commits("b3", [("three: first", {"p3a.txt": "3\n"}),
+                                              ("three: second", {"p3b.txt": "3\n"})])
+        self.real_merge(3, "fix: merge picked commit by commit", "b3", "develop")
+        (e5,) = self.branch_commits("b5", [("five: only", {"p5.txt": "5\n"})])
+        self.real_merge(5, "fix: one-commit merge picked by its commit", "b5", "develop")
+        s6 = self.squash(6, "fix: squash picked onto a hotfix merged for real", {"p6.txt": "6\n"})
+        r.checkout("main")
+        r.pick(s11)
+        r.pick(s12, "-x")
+        r.pick(m2, "-m", "1")
+        r.pick(m4, "-x", "-m", "1")
+        r.pick(e3a)
+        r.pick(e3b)
+        r.pick(e5)
+        r.checkout("hotfix-six", new=True)
+        r.pick(s6)
+        self.real_merge(9, "fix: ship six early", "hotfix-six", "main", base="main")
+        r.tag("v0.1.1")
+        hotfix = self.build("v0.1.1")
+        self.assertEqual(self.groups(hotfix), {"Bug fixes": [2, 4, 5, 9, 11, 12]})
+        self.assertEqual(self.direct(hotfix), ["three: first", "three: second"])
+        self.promote("v0.2.0")
+        later = self.build("v0.2.0")
+        self.assertEqual(self.groups(later), {})
+        self.assertEqual(self.kept_out(later), ([], [2, 3, 4, 5, 6, 11, 12]))
+        self.assertEqual(self.direct(later), [])
+
     def test_a_colour_configuration_hides_no_patch_id(self) -> None:
         # color.diff=always outranks color.ui=false; a coloured diff gives git patch-id nothing.
         r = self.repo
