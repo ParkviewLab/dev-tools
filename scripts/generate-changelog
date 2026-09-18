@@ -453,7 +453,10 @@ class History:
             if not rec:
                 continue
             sha, parents, email, subject = rec.split("\x1f", 3)
-            self.commits[sha] = Commit(sha, tuple(parents.split()), email, subject)
+            # git's %s is one line, but a lone CR in it reaches here as a line feed, since
+            # text mode translates line endings; it is read as a space, as git joins the
+            # subject's lines.
+            self.commits[sha] = Commit(sha, tuple(parents.split()), email, subject.replace("\n", " "))
         self._messages: dict[str, str] | None = None
         self._pid: dict[str, str | None] = {}
         self._load_patch_ids()
@@ -1152,6 +1155,18 @@ def own_version() -> str:
         return "unknown"
 
 
+def literal(text: str) -> str:
+    """Repository text for the job summary, as one Markdown code span on one line: every
+    character that is not printable, line breaks among them, is shown as its escape, and
+    the fence is one backtick longer than the longest run inside, so nothing in the text
+    is read as Markdown or HTML."""
+    text = "".join(c if c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in text)
+    if not text:
+        return "(empty)"
+    fence = "`" * (1 + max((len(run) for run in re.findall(r"`+", text)), default=0))
+    return f"{fence} {text} {fence}"
+
+
 def summary_markdown(repo: Repository, version: str, result: Result, written_by: str) -> str:
     out = [
         f"## {PROG}: {result.tag}",
@@ -1180,13 +1195,13 @@ def summary_markdown(repo: Repository, version: str, result: Result, written_by:
             for e in result.listed
         ],
     )
-    block("Direct commits", [f"- {d.sha[:7]} {d.subject}: {d.note}" for d in result.direct])
+    block("Direct commits", [f"- {d.sha[:7]} {literal(d.subject)}: {literal(d.note)}" for d in result.direct])
     block(
         "Left out",
         [f"- #{c.number}: {c.why}" for c in result.carriers] + [f"- #{s.number}: {s.why}" for s in result.shipped],
     )
-    block("Bookkeeping", [f"- {b.sha[:7]} {b.subject}: {b.reason}" for b in result.bookkeeping])
-    block("Warnings", [f"- {w}" for w in result.warnings])
+    block("Bookkeeping", [f"- {b.sha[:7]} {literal(b.subject)}: {literal(b.reason)}" for b in result.bookkeeping])
+    block("Warnings", [f"- {literal(w)}" for w in result.warnings])
     return "\n".join(out) + "\n"
 
 

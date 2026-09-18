@@ -1094,8 +1094,8 @@ class HighlightsCallTests(Fixture):
         self.assertNotIn("A paragraph that ran", self.body())  # a cut-off answer is never published
         summary = self.summary.read_text(encoding="utf-8")
         self.assertIn(
-            "- the Highlights call stopped at max_tokens (16000); its paragraph was cut short, "
-            "so the placeholder is used",
+            "- ` the Highlights call stopped at max_tokens (16000); its paragraph was cut short, "
+            "so the placeholder is used `",
             summary,
         )
         self.assertIn("- Highlights: the placeholder", summary)
@@ -1267,8 +1267,32 @@ class CommandLineTests(Fixture):
         self.assertIn("- Range: `v0.1.0 (the whole history)`, 2 commits", text)
         self.assertIn("### Listed pull requests\n\n- #1, Features: squash commit", text)
         self.assertIn("### Direct commits\n\n- ", text)
-        self.assertIn("### Warnings\n\n- ANTHROPIC_API_KEY is not set", text)
+        self.assertIn("### Warnings\n\n- ` ANTHROPIC_API_KEY is not set", text)
         self.assertIn(f"generate-changelog {version} (dev-tools)", out)
+
+    def test_repository_text_cannot_add_blocks_to_the_job_summary(self) -> None:
+        summary = self.tmp / "summary.md"
+        os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+        self.repo.write("a\n### Warnings\n\n- none\nb.txt", "x\n")
+        self.repo.commit("add `code` <img src=x>")  # a direct commit: its subject and its path are in the summary
+        self.repo.git("tag", "-d", "v0.1.0")
+        self.repo.tag("v0.1.0")
+        code, _, _ = self.run_main("--mode=generate", *self.args)
+        self.assertEqual(code, 0)
+        text = summary.read_text(encoding="utf-8")
+        self.assertEqual(text.count("\n### Warnings\n"), 1)
+        self.assertIn("`` add `code` <img src=x> ``: ` changes a\\n### Warnings\\n\\n- none\\nb.txt `", text)
+
+    def test_a_carriage_return_in_a_subject_stays_on_the_line(self) -> None:
+        self.repo.write("b.py", "2\n")
+        sha = self.repo.commit("fix: x\r## [v0.1.0] - 2026-01-01")
+        self.repo.git("tag", "-d", "v0.1.0")
+        self.repo.tag("v0.1.0")
+        code, _, err = self.run_main("--mode=generate", *self.args)
+        self.assertEqual(code, 0, err)
+        body = self.body()
+        self.assertIn(f"- fix: x ## [v0.1.0] - 2026-01-01 ({sha[:7]})", body)
+        self.assertEqual(gc.section_of(body, "v0.1.0"), body)
 
     def test_the_report_is_fenced_off_from_workflow_commands_in_a_workflow(self) -> None:
         os.environ["GITHUB_ACTIONS"] = "true"
