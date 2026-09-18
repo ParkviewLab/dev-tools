@@ -7,6 +7,7 @@ Usage (from the root of a dev-tools checkout, which supplies the script):
     python3 tests/acceptance/acceptance.py full [--work DIR] [--report FILE]
     python3 tests/acceptance/acceptance.py tag --clone DIR --tag vX.Y.Z [--report FILE]
     python3 tests/acceptance/acceptance.py release-check --clone DIR --tag vX.Y.Z --report FILE
+    python3 tests/acceptance/acceptance.py profiles [--work DIR] [--report FILE]
 
 It needs the network and gh logged in to GitHub, which is why it is not a unit
 test and is not run in CI. It never calls the model: the script runs without
@@ -47,6 +48,22 @@ release-check
     is fetched first, since the release job commits to main after the tag. All
     of it is written to --report, from which a reader judges the release's notes
     by the criteria in tests/acceptance/README.md.
+
+profiles
+    The real-history check: for each representative of tests/acceptance/
+    representatives.json (one repository per publishing profile), clones it
+    (default: a new temporary directory; a clone already there is fetched
+    instead) and runs the script's generate mode for its latest vX.Y.Z tag.
+    That tag's list is compared with the published list of its GitHub Release,
+    once the release run's changelog job summary shows the release was made by
+    the shared generator (the same marker release-check reads from the job's
+    log); otherwise with the measurement's recorded result for that tag, or,
+    for a tag released after the measurement, the expected set computed from
+    GitHub's record — the same comparison full and tag make.
+
+    Writes the report (default: profiles-report.md in --work) and exits 0 when
+    every representative's tag passes, 1 when one differs or the script fails
+    on one, and 2 on bad arguments or when the run cannot go on.
 """
 
 from __future__ import annotations
@@ -67,6 +84,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parents[1] / "scripts" / "generate-changelog"
 EVIDENCE = HERE / "evidence" / "evidence2.json"
+REPRESENTATIVES = HERE / "representatives.json"
 ORG = "ParkviewLab"
 REPOS = (
     "pensa-grex",
@@ -142,6 +160,14 @@ def slug_of(clone: Path) -> str:
 def recorded() -> dict[tuple[str, str], dict]:
     data = json.loads(EVIDENCE.read_text(encoding="utf-8"))
     return {(r["repo"], r["tag"]): r for r in data["part2"]["per_release"]}
+
+
+def representatives() -> list[dict]:
+    """The active members of the real-history check: one repository per publishing
+    profile (tests/acceptance/representatives.json). A profile with no repository
+    yet carries "repo": null and is left out."""
+    data = json.loads(REPRESENTATIVES.read_text(encoding="utf-8"))
+    return [p for p in data["profiles"] if p.get("repo")]
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +314,20 @@ def diff(expected: str, got: str, a: str, b: str) -> str:
     return "\n".join(difflib.unified_diff(expected.splitlines(), got.splitlines(), a, b, lineterm=""))
 
 
+def published_comparison(repo: str, tag: str, script_listing: str, published_body: str | None) -> TagResult:
+    """The profiles mode's comparison for a tag whose Release the shared generator
+    made: the dry run's list against the published Release's list. Pure given the
+    two texts, so it is exercised offline by tests/test_acceptance_profiles.py."""
+    if published_body is None:
+        return TagResult(
+            repo, tag, "published", False, listing=script_listing, detail="no GitHub Release found for this tag"
+        )
+    _, published_listing = split_section(published_body)
+    passed = script_listing == published_listing
+    detail = "" if passed else diff(published_listing, script_listing, "published", "now")
+    return TagResult(repo, tag, "published", passed, listing=script_listing, detail=detail)
+
+
 # --------------------------------------------------------------------------- #
 # One tag
 # --------------------------------------------------------------------------- #
@@ -297,12 +337,13 @@ def diff(expected: str, got: str, a: str, b: str) -> str:
 class TagResult:
     repo: str
     tag: str
-    basis: str  # "recorded", "ruled" or "expected set"
+    basis: str  # "recorded", "ruled", "expected set" or "published"
     passed: bool
     listing: str = ""
     detail: str = ""
     warnings: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    profile: str = ""  # set by the profiles mode; empty in full, tag and release-check
 
 
 def check_tag(clone: Path, repo: str, tag: str, record: dict | None, prs: dict[int, Merged] | None) -> TagResult:
@@ -478,6 +519,22 @@ def summary_from_log(log: str) -> str | None:
     return "\n".join(out).strip() if on else None
 
 
+def shared_generator_summary(slug: str, tag: str) -> str | None:
+    """The generate-changelog job summary of the run that pushed tag, if its
+    changelog job left one — the marker release-check reads to show the summary,
+    and the profiles mode reads to tell a release the shared generator made from
+    one made another way (an earlier, per-repository generator, or by hand)."""
+    for wr in release_runs(slug, tag):
+        view = json.loads(run(["gh", "run", "view", str(wr["databaseId"]), "-R", slug, "--json", "jobs"]).stdout)
+        for j in sorted(view.get("jobs") or [], key=lambda j: j.get("startedAt") or ""):
+            if j.get("name") != "changelog":
+                continue
+            summary = summary_from_log(job_log(slug, j["databaseId"]))
+            if summary is not None:
+                return summary
+    return None
+
+
 def release_check(args: argparse.Namespace) -> int:
     clone = Path(args.clone).resolve()
     slug = slug_of(clone)
@@ -628,6 +685,74 @@ def release_check(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# Profiles: the real-history check                                            #
+# --------------------------------------------------------------------------- #
+
+
+def check_profile(work: Path, rep: dict, records: dict[tuple[str, str], dict]) -> TagResult:
+    """One representative's latest release tag, against the published list once
+    the shared generator made it, else against check_tag's basis (a ruled
+    difference, the measurement's recording, or the expected set)."""
+    repo = rep["repo"]
+    clone = fresh_clone(work, repo)
+    slug = slug_of(clone)
+    tags = tags_of(clone)
+    if not tags:
+        raise Failure(f"{repo}: no vX.Y.Z tags")
+    tag = tags[-1]
+    summary = shared_generator_summary(slug, tag)
+    if summary is None:
+        prs = merged_pull_requests(slug)
+        r = check_tag(clone, repo, tag, records.get((repo, tag)), prs)
+    else:
+        result = run_script(clone, tag)
+        if result.returncode != 0:
+            r = TagResult(repo, tag, "published", False, detail=f"the script exited {result.returncode}:\n{result.stderr.strip()}")
+        else:
+            _, script_listing = split_section(result.body)
+            rel = run(["gh", "release", "view", tag, "-R", slug, "--json", "body"], check=False)
+            body = json.loads(rel.stdout).get("body") if rel.returncode == 0 else None
+            r = published_comparison(repo, tag, script_listing, body)
+            r.seconds = result.seconds
+    r.profile = rep["profile"]
+    return r
+
+
+def profiles(args: argparse.Namespace) -> int:
+    work = Path(args.work).resolve() if args.work else Path(tempfile.mkdtemp(prefix="gc-profiles-"))
+    work.mkdir(parents=True, exist_ok=True)
+    report = Path(args.report).resolve() if args.report else work / "profiles-report.md"
+    records = recorded()
+    results = []
+    for rep in representatives():
+        r = check_profile(work, rep, records)
+        results.append(r)
+        print(f"{r.profile} ({r.repo} {r.tag}): {'pass' if r.passed else 'DIFFERS'} ({r.basis})", flush=True)
+    failed = [r for r in results if not r.passed]
+    lines = [
+        "# generate-changelog profiles run",
+        "",
+        f"- Run: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}, from {dev_tools_state()}",
+        f"- Representatives: {len(results)}; clones in `{work}`",
+        f"- Verdict: {'PASS' if not failed else 'FAIL'}",
+        "",
+        "## Every representative",
+        "",
+        "| Profile | Repository | Tag | Basis | Result |",
+        "|---|---|---|---|---|",
+        *[f"| {r.profile} | {r.repo} | {r.tag} | {r.basis} | {'pass' if r.passed else 'DIFFERS'} |" for r in results],
+    ]
+    if failed:
+        lines += ["", "## Differences", ""]
+        for r in failed:
+            fence = "```diff" if r.basis != "expected set" else "```"
+            lines += [f"### {r.profile}: {r.repo} {r.tag} ({r.basis})", "", fence, r.detail, "```", ""]
+    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"report: {report}")
+    return 0 if not failed else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="The acceptance run of scripts/generate-changelog.")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -642,6 +767,9 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("--clone", required=True, metavar="DIR", help="a disposable full clone")
     p_check.add_argument("--tag", required=True, metavar="vX.Y.Z")
     p_check.add_argument("--report", required=True, metavar="FILE")
+    p_profiles = sub.add_parser("profiles", help="one representative per publishing profile, at its latest release")
+    p_profiles.add_argument("--work", metavar="DIR", help="where the clones go (default: a new temporary directory)")
+    p_profiles.add_argument("--report", metavar="FILE", help="the report (default: profiles-report.md in --work)")
     args = parser.parse_args(argv)
     if not shutil.which("gh"):
         print("acceptance: error: gh (the GitHub CLI) is not on PATH", file=sys.stderr)
@@ -650,7 +778,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"acceptance: error: {args.tag!r} is not a vX.Y.Z tag", file=sys.stderr)
         return 2
     try:
-        return {"full": full, "tag": one_tag, "release-check": release_check}[args.mode](args)
+        return {"full": full, "tag": one_tag, "release-check": release_check, "profiles": profiles}[args.mode](args)
     except Failure as e:
         print(f"acceptance: error: {e}", file=sys.stderr)
         return 2
