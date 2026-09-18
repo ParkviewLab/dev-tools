@@ -88,9 +88,11 @@ D18) are marked in the comments below:
       never by its title: (i) a commit, not a merge, whose diff apart from
       CHANGELOG.md changes only the project's own version value (D12); (ii) a
       commit, not a merge, that changes only the root CHANGELOG.md, a root
-      commit compared with the empty tree (D13); (iii) a merge not made by
-      GitHub, or a carrier's merge, whose tree equals the automatic merge of
-      its first two parents (D15); (iv) a commit that changes nothing (D14).
+      commit compared with the empty tree (D13); (iii) a merge that R2
+      attributes to no pull request, or a carrier's merge, when it has exactly
+      two parents and its tree equals their automatic merge, which must not
+      conflict (D15); a merge of more than two parents is never bookkeeping;
+      (iv) a commit that changes nothing (D14).
   R6  A pull request's title is the first line of its squash commit or titled
       merge without the (#N) suffix; for a merge at GitHub's default title, the
       title GitHub records (D17). A title "type(scope)!: description" is
@@ -145,10 +147,14 @@ date, which moves with the SDK pin. The script itself needs Python 3.11 or
 later, for tomllib.
 
 Exit codes:
-  0  success, the placeholder paragraph included
-  1  a failure while running: git, the GitHub read, an unreadable release-body.md
-  2  bad arguments: no tag, a tag that is not vX.Y.Z or does not exist, --repo
-     not the root of a git checkout, release-body.md missing for insert
+  0  success, the placeholder paragraph included, and an insert that finds the
+     tag's section already in CHANGELOG.md and writes nothing
+  1  a failure while running: git, the GitHub read, or a release-body.md that
+     cannot be read, does not begin with a "## [vX.Y.Z]" heading, or holds
+     another tag's section
+  2  bad arguments: a command line the parser rejects, no tag, a tag that is
+     not vX.Y.Z, generate with a tag that does not exist, --repo not the root
+     of a git checkout, and insert with no release-body.md
 """
 
 from __future__ import annotations
