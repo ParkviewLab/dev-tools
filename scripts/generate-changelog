@@ -1,0 +1,1340 @@
+#!/usr/bin/env -S uv run --script
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["anthropic==1.6.0"]
+# ///
+"""Generate a release's changelog section from its history and its pull requests.
+
+Usage:
+    generate-changelog [--mode generate|insert|both] [--tag vX.Y.Z] [--repo DIR] [--reuse-committed]
+
+One script for every ParkviewLab release workflow, run from a checkout of
+dev-tools at a pinned release. It reports on the repository at --repo (default:
+the current directory), which must be the root of its git checkout; it never
+takes the repository from its own location, so a dev-tools checkout inside the
+workspace is not read. The only thing it reads from its own checkout is its own
+version (VERSION.txt), which it prints. The repository's GitHub address is read
+from the origin remote, else from GITHUB_REPOSITORY.
+
+Modes
+-----
+  generate  Read the history at the tag and the repository's merged pull requests,
+            ask the model for the Highlights paragraph, and write the complete
+            section to release-body.md at the repository root.
+  insert    Put release-body.md into CHANGELOG.md below "## [Unreleased]",
+            creating the file when it is absent. No network. When CHANGELOG.md
+            already holds a section for the tag, it does nothing and says so, so
+            a re-run after a partial failure never adds a second section.
+  both      generate, then insert (the default).
+
+The tag comes from --tag, else from GITHUB_REF on a tag push; with neither,
+generate refuses and exits with status 2. --tag serves every run outside a tag
+push: a local run, a dry run, and the repair of a failed release.
+
+With --reuse-committed, which the release workflow passes, generate first looks
+in CHANGELOG.md on origin/main: when a section for the tag is already there, it
+writes that section to release-body.md unchanged, reads nothing from GitHub,
+makes no model call, and says so. A re-run of a release job whose section was
+committed before the job failed therefore creates the Release from the
+committed text, and the two published forms agree. Without the option the
+section is always built afresh.
+
+The section
+-----------
+    ## [vX.Y.Z] - YYYY-MM-DD      (the tagged commit's date)
+
+    ### Highlights
+
+    <a paragraph written by the model>
+
+    <the list>
+
+The list is built by seven rules (R1 to R7), and the points they decide (D1 to
+D18) are marked in the comments below:
+
+  R1  The range is git rev-list <previous>..<tag>, where the previous tag is the
+      highest vX.Y.Z tag below this one by its three numbers (D1); a first
+      release's range is the whole history, git rev-list <tag> (D2).
+  R2  A commit belongs to pull request #N when it is (a) a squash commit made by
+      GitHub: committer noreply@github.com, one parent, a first line ending in
+      (#N), the last such suffix counting (D4); (b) a merge made by GitHub whose
+      first line ends in (#N) or reads "Merge pull request #N from ..."; or (c)
+      a cherry-pick of one of those: a commit, not a merge, whose "(cherry
+      picked from commit X)" trailer names one, or, failing a trailer, whose
+      patch-id equals one's (D6). Commits of kinds (a) and (b) are looked for
+      in every ref of the clone (D3). A real merge's own commits, those
+      reachable from its second parent and not its first, belong to its pull
+      request and are never listed on their own, except another pull
+      request's commit of kind (a) or (b) among them (D5). A commit ending in
+      (#N) that is none of these is not believed: it is a direct commit, and
+      the script warns.
+  R3  A pull request from this repository, not a fork, whose head branch is
+      develop, main or back-merge-vX.Y.Z carries work recorded elsewhere and
+      is not listed (D9). Its merge is examined under R5 (iii) and its other
+      commits one by one (D10); a carrier merged by squash is left out with a
+      warning. Carriers are left out of the patch-id index (D7).
+  R4  A pull request is not listed when a commit attributed to it is reachable
+      from the previous tag (D11), or when it was merged for real and every
+      one of its own commits other than merges has a patch-id among the
+      commits reachable from the previous tag (D8).
+  R5  Every other commit in the range is bookkeeping, left out, or a direct
+      commit, listed. Bookkeeping is recognised by what a commit changes,
+      never by its title: (i) a commit, not a merge, whose diff apart from
+      CHANGELOG.md changes only the project's own version value (D12); (ii) a
+      commit, not a merge, that changes only the root CHANGELOG.md, a root
+      commit compared with the empty tree (D13); (iii) a merge not made by
+      GitHub, or a carrier's merge, whose tree equals the automatic merge of
+      its first two parents (D15); (iv) a commit that changes nothing (D14).
+  R6  A pull request's title is the first line of its squash commit or titled
+      merge without the (#N) suffix; for a merge at GitHub's default title, the
+      title GitHub records (D17). A title "type(scope)!: description" is
+      grouped by its type, matched without regard to case (D16); any other
+      title goes under Other changes, shown in full.
+  R7  A pull request is breaking when its title has "!" after the type, or a
+      line beginning "BREAKING CHANGE:" or "BREAKING-CHANGE:" appears in its
+      squash, merge or pick message, in one of its own commits, or in its body
+      on GitHub (D18). It is listed once, under Breaking changes. The script
+      warns when the major number rises and nothing breaking is listed, never
+      for a first release.
+
+A pull request's line reads "- <description, first letter capitalised> (#N)";
+a direct commit's reads "- <subject> (<short hash>)". The groups appear in the
+order Breaking changes, Features, Bug fixes, Performance, Refactor, Docs, Tests,
+Reverts, Maintenance, Other changes, Direct commits; an empty group is omitted,
+and a release with nothing to list reads "_No changes._".
+
+GitHub and the model
+--------------------
+The script reads one thing from GitHub's REST API, through gh (with GH_TOKEN in
+a workflow, the person's own login locally): the repository's merged pull
+requests, with each one's number, title, body, base and head branch, head
+repository and merge commit. If that read fails, the run fails and names the
+cause: a list built without it would be wrong without saying so.
+
+The Highlights paragraph is written by claude-opus-5 from the entries the list
+holds: the title and body of every listed pull request, as GitHub records them,
+and the subject and body of every direct commit. The input is capped at 50,000
+characters; every entry's title or subject goes in first and the bodies share
+what remains, each shortened as needed, so that no entry is lost to the cap.
+A missing ANTHROPIC_API_KEY, a failed call, a refusal or an empty answer gives
+the marked placeholder, and the release ships. The anthropic SDK is imported
+inside that call alone, so everything else needs the standard library only.
+
+The job summary
+---------------
+The script prints a report, and appends it to GITHUB_STEP_SUMMARY when that is
+set: its own dev-tools version, the range, every listed pull request with the
+route by which it was recognised, the carriers and the pull requests already
+shipped that it left out, the bookkeeping commits with their reasons, and its
+warnings. Warnings never enter the notes and never fail the run.
+
+The inline metadata asks for Python 3.11 or later: the version files are read
+with tomllib, which Python 3.11 added (the SDK itself needs 3.10).
+
+Exit codes:
+  0  success, the placeholder paragraph included
+  1  a failure while running: git, the GitHub read, an unreadable release-body.md
+  2  bad arguments: no tag, a tag that is not vX.Y.Z or does not exist, --repo
+     not the root of a git checkout, release-body.md missing for insert
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+PROG = "generate-changelog"
+
+# The Highlights call. The model is pinned here, once for every repository;
+# moving it is a dev-tools release. Thinking is left at the model's default
+# (adaptive, on for claude-opus-5), which counts against max_tokens.
+HIGHLIGHTS_MODEL = "claude-opus-5"
+HIGHLIGHTS_EFFORT = "high"
+HIGHLIGHTS_MAX_TOKENS = 16_000
+# Server-side refusal fallbacks: a declined request is re-run on Anthropic's
+# recommended fallback model inside the same call.
+HIGHLIGHTS_BETA = "server-side-fallback-2026-07-01"
+MAX_INPUT_CHARS = 50_000
+SHORTENED = " [shortened]"
+PLACEHOLDER = "_Highlights were not generated for this release._"
+
+RELEASE_BODY = "release-body.md"
+CHANGELOG = "CHANGELOG.md"
+CHANGELOG_SKELETON = "# Changelog\n\nAll notable changes to this project are recorded here.\n\n## [Unreleased]\n"
+
+GITHUB_EMAIL = "noreply@github.com"
+TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+PR_SUFFIX = re.compile(r"\(#(\d+)\)\s*$")
+MERGE_DEFAULT = re.compile(r"^Merge pull request #(\d+) from \S+")
+PICK_TRAILER = re.compile(r"\(cherry picked from commit ([0-9a-f]{7,40})\)")
+# D16: a type of letters only, an optional (scope), an optional !, a colon, at
+# least one blank, and a description; the type is matched without regard to case.
+CONVENTIONAL = re.compile(
+    r"^(?P<type>[A-Za-z]+)(?:\((?P<scope>[^()\r\n]*)\))?(?P<bang>!)?:[ \t]+(?P<desc>\S.*)$"
+)
+# D18: at the start of a line, case-sensitive.
+BREAKING_LINE = re.compile(r"(?m)^BREAKING[ -]CHANGE:")
+# D9: the head branches of a carrier, from this repository only.
+CARRIER_HEADS = ("develop", "main")
+BACK_MERGE_HEAD = re.compile(r"^back-merge-v[0-9]+\.[0-9]+\.[0-9]+$")
+REMOTE_RE = re.compile(r"github\.com[:/](?P<owner>[^/:]+)/(?P<name>[^/]+?)(?:\.git)?/?$")
+SECTION_HEAD_RE = re.compile(r"^## \[(v\d+\.\d+\.\d+)\]")
+
+GROUP_OF_TYPE = {
+    "feat": "Features",
+    "fix": "Bug fixes",
+    "perf": "Performance",
+    "refactor": "Refactor",
+    "docs": "Docs",
+    "test": "Tests",
+    "revert": "Reverts",
+    "build": "Maintenance",
+    "chore": "Maintenance",
+    "ci": "Maintenance",
+    "style": "Maintenance",
+}
+GROUP_ORDER = (
+    "Breaking changes",
+    "Features",
+    "Bug fixes",
+    "Performance",
+    "Refactor",
+    "Docs",
+    "Tests",
+    "Reverts",
+    "Maintenance",
+    "Other changes",
+)
+
+# D12: the version sources of truth and their lockfiles, at the repository root only.
+SOT_FILES = frozenset({"pyproject.toml", "package.json", "Cargo.toml", "VERSION.txt"})
+LOCK_FILES = frozenset({"uv.lock", "package-lock.json", "Cargo.lock"})
+VERSION_LINE = re.compile(r'^\s*"?version"?\s*[:=]')
+
+ROUTES = {
+    "squash": "squash commit",
+    "merge-titled": "merge titled with the pull request",
+    "merge-default-title": "merge at GitHub's default title",
+    "cherry-pick (trailer)": "cherry-pick, by its trailer",
+    "cherry-pick (patch-id)": "cherry-pick, by patch-id",
+}
+
+
+class ChangelogError(Exception):
+    """A failure that stops the run (exit status 1)."""
+
+
+class UsageError(Exception):
+    """Bad arguments (exit status 2)."""
+
+
+# --------------------------------------------------------------------------- #
+# The repository and its pull requests
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Repository:
+    root: Path
+    slug: str | None  # owner/name on GitHub, when it can be told
+
+    @property
+    def name(self) -> str:
+        return self.slug.split("/", 1)[1] if self.slug else self.root.name
+
+
+def resolve_repository(arg: str) -> Repository:
+    root = Path(arg).resolve()
+    if not root.is_dir():
+        raise UsageError(f"--repo {arg}: not a directory")
+    try:
+        p = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False
+        )
+    except OSError as e:
+        raise ChangelogError(f"git cannot be run: {e}") from None
+    if p.returncode != 0:
+        raise UsageError(f"--repo {arg}: not a git checkout")
+    top = Path(p.stdout.strip()).resolve()
+    if top != root:
+        raise UsageError(f"--repo {arg} is inside the checkout at {top} but is not its root; pass the root")
+    url = subprocess.run(
+        ["git", "-C", str(root), "remote", "get-url", "origin"], capture_output=True, text=True, check=False
+    )
+    m = REMOTE_RE.search(url.stdout.strip()) if url.returncode == 0 else None
+    if m:
+        return Repository(root, f"{m['owner']}/{m['name']}")
+    slug = os.environ.get("GITHUB_REPOSITORY", "")
+    if slug.count("/") == 1 and all(slug.split("/")):
+        return Repository(root, slug)
+    return Repository(root, None)
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    number: int
+    title: str
+    body: str
+    base: str
+    head: str
+    same_repository: bool  # the head branch lives in this repository, not a fork
+    merge_commit: str | None
+
+
+def pull_request_from_rest(obj: dict) -> PullRequest | None:
+    """A merged pull request from one object of GET /repos/{owner}/{repo}/pulls; None when unmerged."""
+    if not obj.get("merged_at"):
+        return None
+    head = obj.get("head") or {}
+    base = obj.get("base") or {}
+    head_repo = (head.get("repo") or {}).get("full_name")
+    base_repo = (base.get("repo") or {}).get("full_name")
+    # A deleted fork leaves head.repo null; it is still not this repository.
+    same = bool(head_repo and base_repo and head_repo.lower() == base_repo.lower())
+    return PullRequest(
+        number=int(obj["number"]),
+        title=obj.get("title") or "",
+        body=obj.get("body") or "",
+        base=base.get("ref") or "",
+        head=head.get("ref") or "",
+        same_repository=same,
+        merge_commit=obj.get("merge_commit_sha"),
+    )
+
+
+def fetch_pull_requests(slug: str) -> list[dict]:
+    """Every closed pull request of the repository, as GitHub's REST API returns them."""
+    gh = shutil.which("gh")
+    if not gh:
+        raise ChangelogError("gh (the GitHub CLI) is not on PATH; it reads the repository's pull requests")
+    cmd = [gh, "api", "--paginate", f"repos/{slug}/pulls?state=closed&per_page=100"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", check=False)
+    except OSError as e:
+        raise ChangelogError(f"gh cannot be run: {e}") from None
+    if p.returncode != 0:
+        raise ChangelogError(
+            f"reading the pull requests of {slug} from GitHub failed (gh api exited {p.returncode}): "
+            f"{p.stderr.strip() or p.stdout.strip()}"
+        )
+    return parse_pages(p.stdout, slug)
+
+
+def parse_pages(text: str, slug: str) -> list[dict]:
+    """gh api --paginate prints one JSON array per page, one after another."""
+    decoder = json.JSONDecoder()
+    items: list[dict] = []
+    i = 0
+    while True:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            return items
+        try:
+            page, i = decoder.raw_decode(text, i)
+        except json.JSONDecodeError as e:
+            raise ChangelogError(f"the pull requests of {slug} read from GitHub are not JSON: {e}") from None
+        if not isinstance(page, list):
+            raise ChangelogError(f"the pull requests of {slug} read from GitHub are not a list")
+        items.extend(page)
+
+
+def read_pull_requests(repo: Repository) -> dict[int, PullRequest]:
+    if not repo.slug:
+        raise ChangelogError(
+            "cannot tell which GitHub repository this is: no github.com origin remote to read, "
+            "and GITHUB_REPOSITORY is not set"
+        )
+    prs: dict[int, PullRequest] = {}
+    for obj in fetch_pull_requests(repo.slug):
+        pr = pull_request_from_rest(obj)
+        if pr is not None:
+            prs[pr.number] = pr
+    return prs
+
+
+# --------------------------------------------------------------------------- #
+# git
+# --------------------------------------------------------------------------- #
+
+
+class Git:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        # A signature shown by a person's log configuration would break the parsing.
+        self.base = ["git", "-C", str(root), "-c", "log.showSignature=false"]
+
+    def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        try:
+            p = subprocess.run([*self.base, *args], capture_output=True, text=True, errors="replace", check=False)
+        except OSError as e:
+            raise ChangelogError(f"git cannot be run: {e}") from None
+        if check and p.returncode != 0:
+            raise ChangelogError(f"git {' '.join(args)} failed: {p.stderr.strip()}")
+        return p
+
+    def out(self, *args: str) -> str:
+        return self.run(*args).stdout
+
+    def raw(self, *args: str, stdin: bytes | None = None) -> bytes:
+        """Binary-safe, for the diffs piped into git patch-id."""
+        try:
+            p = subprocess.run([*self.base, *args], input=stdin, capture_output=True, check=False)
+        except OSError as e:
+            raise ChangelogError(f"git cannot be run: {e}") from None
+        if p.returncode != 0:
+            raise ChangelogError(f"git {' '.join(args)} failed: {p.stderr.decode(errors='replace').strip()}")
+        return p.stdout
+
+    def blob(self, rev: str, path: str) -> str | None:
+        """A file's text at a revision, or None when it is absent there."""
+        p = self.run("cat-file", "blob", f"{rev}:{path}", check=False)
+        return p.stdout if p.returncode == 0 else None
+
+
+def version_key(tag: str) -> tuple[int, int, int]:
+    m = TAG_RE.match(tag)
+    if not m:
+        raise ValueError(tag)
+    return (int(m[1]), int(m[2]), int(m[3]))
+
+
+def previous_tag(git: Git, tag: str) -> str | None:
+    """D1: the highest vX.Y.Z tag below this one, by its three numbers."""
+    key = version_key(tag)
+    below = [t for t in git.out("tag", "--list", "v*").split() if TAG_RE.match(t) and version_key(t) < key]
+    return max(below, key=version_key) if below else None
+
+
+# --------------------------------------------------------------------------- #
+# The history index (R2)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Commit:
+    sha: str
+    parents: tuple[str, ...]
+    email: str
+    subject: str
+
+
+@dataclass(frozen=True)
+class Attribution:
+    route: str  # a key of ROUTES
+    number: int
+    original: str | None = None  # the GitHub-made commit a cherry-pick copies
+
+
+class History:
+    """Every commit reachable from any ref of the clone: branches, remote-tracking
+    branches and tags (D3), with GitHub's commits attributed to pull requests."""
+
+    def __init__(self, git: Git, prs: dict[int, PullRequest]) -> None:
+        self.git = git
+        self.prs = prs
+        self.commits: dict[str, Commit] = {}
+        for rec in git.out("log", "--all", "--format=%H%x1f%P%x1f%ce%x1f%s%x1e").split("\x1e"):
+            rec = rec.strip("\n")
+            if not rec:
+                continue
+            sha, parents, email, subject = rec.split("\x1f", 3)
+            self.commits[sha] = Commit(sha, tuple(parents.split()), email, subject)
+        self._messages: dict[str, str] | None = None
+        self._pid: dict[str, str | None] = {}
+        self._load_patch_ids()
+        # R2 (a) and (b): GitHub-made commits attributed to a pull request, anywhere.
+        self.github: dict[str, Attribution] = {}
+        for sha, c in self.commits.items():
+            a = self._github_attribution(c)
+            if a is not None:
+                self.github[sha] = a
+        # R2 (c): patch-id -> pull requests, over GitHub's commits of pull requests
+        # that are not carriers, so no commit is taken for a pick of a carrier (D7).
+        self.pid_index: dict[str, set[int]] = {}
+        for sha, a in self.github.items():
+            if self.is_carrier(a.number):
+                continue
+            pid = self.patch_id(sha)
+            if pid:
+                self.pid_index.setdefault(pid, set()).add(a.number)
+
+    def is_merge(self, sha: str) -> bool:
+        return len(self.commits[sha].parents) >= 2
+
+    def is_carrier(self, n: int) -> bool:
+        """R3 (D9): by head branch alone, and only from this repository."""
+        pr = self.prs.get(n)
+        if pr is None or not pr.same_repository:
+            return False
+        return pr.head in CARRIER_HEADS or bool(BACK_MERGE_HEAD.match(pr.head))
+
+    def message(self, sha: str) -> str:
+        if self._messages is None:
+            self._messages = {}
+            for rec in self.git.out("log", "--all", "--format=%H%x1f%B%x1e").split("\x1e"):
+                rec = rec.lstrip("\n")
+                if "\x1f" in rec:
+                    s, body = rec.split("\x1f", 1)
+                    self._messages[s] = body
+        if sha not in self._messages:
+            self._messages[sha] = self.git.out("log", "-1", "--format=%B", sha)
+        return self._messages[sha]
+
+    def body(self, sha: str) -> str:
+        """The message without its subject paragraph."""
+        parts = self.message(sha).strip("\n").split("\n\n", 1)
+        return parts[1].strip() if len(parts) == 2 else ""
+
+    def _github_attribution(self, c: Commit) -> Attribution | None:
+        if c.email != GITHUB_EMAIL:
+            return None
+        if len(c.parents) >= 2:
+            m = MERGE_DEFAULT.match(c.subject)
+            if m:
+                return Attribution("merge-default-title", int(m[1]))
+            m = PR_SUFFIX.search(c.subject)
+            return Attribution("merge-titled", int(m[1])) if m else None
+        if len(c.parents) == 1:  # D4: one parent, the last (#N) of the first line
+            m = PR_SUFFIX.search(c.subject)
+            return Attribution("squash", int(m[1])) if m else None
+        return None
+
+    def _load_patch_ids(self) -> None:
+        """D6: git patch-id --stable of every commit that is not a merge, from one log pass."""
+        log = self.git.raw(
+            "log", "--all", "--no-merges", "--no-renames", "--no-textconv", "--no-ext-diff", "-p", "--format=commit %H"
+        )
+        out = self.git.raw("patch-id", "--stable", stdin=log).decode()
+        for line in out.splitlines():
+            pid, sha = line.split()
+            self._pid[sha] = pid
+
+    def patch_id(self, sha: str) -> str | None:
+        """A commit's own diff; for a merge (D6), git diff M^1 M, which git cherry-pick -m 1 M applies."""
+        if sha in self._pid:
+            return self._pid[sha]
+        pid = None
+        if self.is_merge(sha):
+            diff = self.git.raw("diff", "--no-renames", "--no-textconv", "--no-ext-diff", f"{sha}^1", sha)
+            if diff:
+                out = self.git.raw("patch-id", "--stable", stdin=diff).decode().split()
+                pid = out[0] if out else None
+        self._pid[sha] = pid  # an empty commit has none
+        return pid
+
+    def attribute(self, sha: str) -> Attribution | None:
+        """R2 (a, b, c) for one commit."""
+        if sha in self.github:
+            return self.github[sha]
+        if self.is_merge(sha):
+            return None  # D6: a merge is never a cherry-pick
+        for x in PICK_TRAILER.findall(self.message(sha)):  # D6: the trailer first
+            p = self.git.run("rev-parse", "--verify", "--quiet", f"{x}^{{commit}}", check=False)
+            full = p.stdout.strip()
+            if p.returncode == 0 and full in self.github and not self.is_carrier(self.github[full].number):
+                return Attribution("cherry-pick (trailer)", self.github[full].number, full)
+        pid = self.patch_id(sha)
+        if pid and pid in self.pid_index:
+            n = min(self.pid_index[pid])  # D6: several pull requests share it: the lowest number
+            original = next(s for s, a in self.github.items() if a.number == n and self.patch_id(s) == pid)
+            return Attribution("cherry-pick (patch-id)", n, original)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Bookkeeping (R5)
+# --------------------------------------------------------------------------- #
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _without(d: dict, *path: str) -> dict:
+    """A deep copy of d with the key at path removed."""
+    d = json.loads(json.dumps(d, default=str))
+    node = d
+    for key in path[:-1]:
+        node = node.get(key)
+        if not isinstance(node, dict):
+            return d
+    node.pop(path[-1], None)
+    return d
+
+
+def _package_lock_without_version(d: dict) -> dict:
+    d = _without(d, "version")
+    packages = d.get("packages")
+    if isinstance(packages, dict) and isinstance(packages.get(""), dict):
+        packages[""].pop("version", None)
+    return d
+
+
+def _toml_lock_without_own_version(d: dict, own_names: set[str]) -> dict:
+    d = json.loads(json.dumps(d, default=str))
+    for pkg in d.get("package", []) or []:
+        if not isinstance(pkg, dict):
+            continue
+        src = pkg.get("source")
+        own = isinstance(src, dict) and (src.get("editable") == "." or src.get("virtual") == ".")
+        if own or _norm(str(pkg.get("name", ""))) in own_names:
+            pkg.pop("version", None)
+    return d
+
+
+def _only_version_lines_change(old: str, new: str) -> bool:
+    a, b = old.splitlines(), new.splitlines()
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if op != "equal" and not all(VERSION_LINE.match(line) for line in a[i1:i2] + b[j1:j2]):
+            return False
+    return True
+
+
+def version_only_change(git: Git, parent: str, sha: str, path: str) -> tuple[bool, str]:
+    """D12: every changed line a version line, and the parsed file otherwise identical."""
+    old, new = git.blob(parent, path), git.blob(sha, path)
+    if old is None or new is None:
+        return False, f"{path} added or removed"
+    if path == "VERSION.txt":
+        ok = bool(re.fullmatch(r"\s*\S+\s*", old)) and bool(re.fullmatch(r"\s*\S+\s*", new))
+        return (ok, f"VERSION.txt {old.strip()} -> {new.strip()}") if ok else (False, "VERSION.txt not a single value")
+    if not _only_version_lines_change(old, new):
+        return False, f"{path}: a changed line is not a version line"
+    try:
+        if path == "pyproject.toml":
+            a, b = tomllib.loads(old), tomllib.loads(new)
+            same = _without(a, "project", "version") == _without(b, "project", "version")
+            va, vb = (a.get("project") or {}).get("version"), (b.get("project") or {}).get("version")
+        elif path == "Cargo.toml":
+            a, b = tomllib.loads(old), tomllib.loads(new)
+            same = _without(a, "package", "version") == _without(b, "package", "version")
+            va, vb = (a.get("package") or {}).get("version"), (b.get("package") or {}).get("version")
+        elif path == "package.json":
+            a, b = json.loads(old), json.loads(new)
+            same = _without(a, "version") == _without(b, "version")
+            va, vb = a.get("version"), b.get("version")
+        elif path == "package-lock.json":
+            a, b = json.loads(old), json.loads(new)
+            same = _package_lock_without_version(a) == _package_lock_without_version(b)
+            va, vb = a.get("version"), b.get("version")
+        elif path in ("uv.lock", "Cargo.lock"):
+            manifest = "pyproject.toml" if path == "uv.lock" else "Cargo.toml"
+            own: set[str] = set()
+            for rev in (parent, sha):
+                text = git.blob(rev, manifest)
+                if not text:
+                    continue
+                try:
+                    m = tomllib.loads(text)
+                except tomllib.TOMLDecodeError:
+                    continue
+                name = (m.get("project") or m.get("package") or {}).get("name")
+                if name:
+                    own.add(_norm(str(name)))
+            a, b = tomllib.loads(old), tomllib.loads(new)
+            same = _toml_lock_without_own_version(a, own) == _toml_lock_without_own_version(b, own)
+            if not same:
+                return False, f"{path}: a value other than the project's own version changed"
+            return True, f"{path} own entry"
+        else:
+            return False, f"{path} is not a version file"
+    except (tomllib.TOMLDecodeError, json.JSONDecodeError, AttributeError) as e:
+        return False, f"{path} does not parse: {e}"
+    if not same:
+        return False, f"{path}: a value other than the project's own version changed"
+    return True, f"{path} {va} -> {vb}"
+
+
+def bookkeeping_of(git: Git, sha: str, parents: tuple[str, ...]) -> tuple[str | None, str]:
+    """R5 (i), (ii) and (iv) for a commit that is not a merge: (reason or None, detail)."""
+    if parents:
+        out = git.out("diff-tree", "-r", "-z", "--no-commit-id", "--no-renames", "--name-status", parents[0], sha)
+    else:  # D13: a root commit is compared with the empty tree
+        out = git.out("diff-tree", "-r", "-z", "--no-commit-id", "--no-renames", "--name-status", "--root", sha)
+    fields = out.split("\0")
+    changes = [(fields[i], fields[i + 1]) for i in range(0, len(fields) - 1, 2) if fields[i]]
+    if not changes:
+        return "changes nothing", "an empty commit"  # D14
+    other = [(status, path) for status, path in changes if path != CHANGELOG]
+    if not other:
+        return "changelog only", f"changes only {CHANGELOG}"
+    if not parents:
+        return None, "root commit"
+    details = []
+    for status, path in other:
+        if status != "M" or path not in SOT_FILES | LOCK_FILES:
+            return None, f"changes {path}"
+        ok, detail = version_only_change(git, parents[0], sha, path)
+        if not ok:
+            return None, detail
+        details.append(detail)
+    return "version only", "; ".join(details) + (f"; {CHANGELOG}" if len(other) < len(changes) else "")
+
+
+def merge_against_automatic(git: Git, sha: str, parents: tuple[str, ...]) -> tuple[bool, str]:
+    """R5 (iii), D15: does the merge's tree equal the automatic merge of its first two parents?"""
+    if len(parents) != 2:
+        return False, f"{len(parents)}-parent merge: no automatic merge to compare with"
+    p = git.run("merge-tree", "--write-tree", "--no-messages", "--name-only", parents[0], parents[1], check=False)
+    if p.returncode not in (0, 1):
+        return False, f"the automatic merge could not be computed: {p.stderr.strip()}"
+    lines = p.stdout.splitlines()
+    auto = lines[0].strip() if lines else ""
+    conflicted = p.returncode == 1
+    tree = git.out("rev-parse", f"{sha}^{{tree}}").strip()
+    if auto == tree and not conflicted:
+        return True, "tree equals the automatic merge of its parents"
+    stat = git.out("diff", "--no-renames", "--stat=200", auto, tree).strip() if auto else ""
+    files = sorted({ln for ln in lines[1:] if ln.strip()})
+    what = f"automatic merge conflicts in {', '.join(files)}; " if conflicted else ""
+    return False, what + "differs from the automatic merge: " + (stat.replace("\n", " | ") or "(no textual diff)")
+
+
+# --------------------------------------------------------------------------- #
+# The rule
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class PullEntry:
+    number: int
+    commits: list[str] = field(default_factory=list)  # the commits in the range attributed to it
+    routes: list[str] = field(default_factory=list)
+    originals: list[str] = field(default_factory=list)  # for a cherry-pick, the commit it copies
+    own: list[str] = field(default_factory=list)  # a real merge's own commits in the range (D5)
+    title: str = ""
+    type: str | None = None
+    breaking: list[str] = field(default_factory=list)
+    group: str = ""
+    line: str = ""
+
+
+@dataclass
+class DirectCommit:
+    sha: str
+    subject: str
+    body: str
+    merge: bool
+    note: str
+
+
+@dataclass
+class Bookkeeping:
+    sha: str
+    subject: str
+    reason: str
+
+
+@dataclass
+class LeftOut:
+    number: int
+    why: str
+
+
+@dataclass
+class Result:
+    tag: str
+    prev: str | None
+    commit_count: int
+    groups: dict[str, list[PullEntry]]
+    direct: list[DirectCommit]
+    bookkeeping: list[Bookkeeping]
+    carriers: list[LeftOut]
+    shipped: list[LeftOut]
+    warnings: list[str]
+
+    @property
+    def range_text(self) -> str:
+        return f"{self.prev}..{self.tag}" if self.prev else f"{self.tag} (the whole history)"
+
+    @property
+    def listed(self) -> list[PullEntry]:
+        return [e for g in GROUP_ORDER for e in self.groups.get(g, [])]
+
+    def render(self) -> str:
+        parts = []
+        for g in GROUP_ORDER:
+            entries = self.groups.get(g)
+            if entries:
+                lines = [f"- {e.line[:1].upper()}{e.line[1:]} (#{e.number})" for e in entries]
+                parts.append(f"### {g}\n\n" + "\n".join(lines))
+        if self.direct:
+            parts.append("### Direct commits\n\n" + "\n".join(f"- {d.subject} ({d.sha[:7]})" for d in self.direct))
+        return "\n\n".join(parts) if parts else "_No changes._"
+
+
+@dataclass
+class Conventional:
+    type: str | None
+    bang: bool
+    desc: str
+
+
+def conventional(title: str) -> Conventional:
+    m = CONVENTIONAL.match(title.strip())
+    if not m:
+        return Conventional(None, False, title.strip())
+    return Conventional(m["type"].lower(), bool(m["bang"]), m["desc"].strip())
+
+
+def strip_suffix(subject: str) -> str:
+    return PR_SUFFIX.sub("", subject).rstrip()
+
+
+def build_list(git: Git, prs: dict[int, PullRequest], tag: str) -> Result:
+    history = History(git, prs)
+    prev = previous_tag(git, tag)
+    warnings: list[str] = []
+
+    # R1
+    spec = [f"refs/tags/{prev}..refs/tags/{tag}"] if prev else [f"refs/tags/{tag}"]
+    rng = git.out("rev-list", "--topo-order", "--reverse", *spec).split()
+    in_range = set(rng)
+
+    # D5: the own commits of each real merge of a listed pull request in the range.
+    absorbed: dict[str, int] = {}
+    own_commits: dict[int, list[str]] = {}
+    for sha in rng:
+        a = history.github.get(sha)
+        if a is None or not a.route.startswith("merge") or history.is_carrier(a.number):
+            continue
+        parents = history.commits[sha].parents
+        for c in git.out("rev-list", *parents[1:], f"^{parents[0]}").split():
+            if c not in in_range:
+                continue
+            nested = history.github.get(c)
+            if nested is not None and not history.is_carrier(nested.number):
+                continue  # another pull request's own commit stays that pull request's
+            absorbed.setdefault(c, a.number)
+            own_commits.setdefault(a.number, []).append(c)
+
+    listed: dict[int, PullEntry] = {}
+    direct: list[DirectCommit] = []
+    bookkeeping: list[Bookkeeping] = []
+    carriers: dict[int, LeftOut] = {}
+
+    def add(n: int, sha: str, a: Attribution) -> None:
+        e = listed.setdefault(n, PullEntry(n))
+        e.commits.append(sha)
+        e.routes.append(a.route)
+        if a.original:
+            e.originals.append(a.original)
+        if not a.route.startswith("cherry-pick"):  # the check against GitHub's record
+            recorded = prs[n].merge_commit if n in prs else None
+            if recorded and recorded != sha:
+                warnings.append(f"{sha[:10]} claims #{n}, but GitHub records {recorded[:10]} as its merge commit")
+
+    for sha in rng:
+        if sha in absorbed:
+            continue
+        c = history.commits[sha]
+        a = history.attribute(sha)
+        if a is not None:
+            if history.is_carrier(a.number):  # R3
+                pr = prs[a.number]
+                carriers.setdefault(a.number, LeftOut(a.number, f"carrier (head {pr.head}), {ROUTES[a.route]} {sha[:10]}"))
+                if a.route == "squash":
+                    warnings.append(
+                        f"{sha[:10]} is a squash merge of carrier pull request #{a.number}; "
+                        "the changes it carries cannot be told apart, so it is left out"
+                    )
+                    continue
+                # D10: the carrier's merge is examined as if it were not there.
+                ok, why = merge_against_automatic(git, sha, c.parents)
+                if ok:
+                    bookkeeping.append(Bookkeeping(sha, c.subject, f"carrier #{a.number}'s merge: {why}"))
+                else:
+                    direct.append(DirectCommit(sha, c.subject, history.body(sha), True, why))
+                    warnings.append(f"{sha[:10]} carrier #{a.number}'s merge {why}")
+                continue
+            if a.number not in prs:
+                warnings.append(f"{sha[:10]} is attributed to #{a.number}, which GitHub does not list as merged")
+            add(a.number, sha, a)
+            continue
+        if len(c.parents) >= 2:  # R5 (iii)
+            ok, why = merge_against_automatic(git, sha, c.parents)
+            if ok:
+                bookkeeping.append(Bookkeeping(sha, c.subject, f"merge: {why}"))
+            else:
+                direct.append(DirectCommit(sha, c.subject, history.body(sha), True, why))
+                warnings.append(f"{sha[:10]} merge '{c.subject}' {why}")
+            continue
+        reason, detail = bookkeeping_of(git, sha, c.parents)  # R5 (i), (ii), (iv)
+        if reason:
+            bookkeeping.append(Bookkeeping(sha, c.subject, f"{reason}: {detail}"))
+            continue
+        m = PR_SUFFIX.search(c.subject)
+        if m:
+            warnings.append(
+                f"{sha[:10]} ends in (#{m[1]}) but is neither made by GitHub nor a cherry-pick of a "
+                "GitHub-made commit; listed as a direct commit"
+            )
+        direct.append(DirectCommit(sha, c.subject, history.body(sha), False, detail))
+
+    # R4: once only.
+    shipped: list[LeftOut] = []
+    if prev:
+        prev_commits = git.out("rev-list", f"refs/tags/{prev}").split()
+        evidence: dict[int, str] = {}
+        for sha in prev_commits:  # D11: the ancestry of the version-previous tag only
+            a = history.attribute(sha)
+            if a is not None and a.number not in evidence:
+                evidence[a.number] = f"{sha[:10]} ({ROUTES[a.route]})"
+        prev_pids: set[str] | None = None
+        for n in sorted(listed):
+            if n in evidence:
+                shipped.append(LeftOut(n, f"already shipped: {evidence[n]} is reachable from {prev}"))
+                continue
+            own = [c for c in own_commits.get(n, []) if not history.is_merge(c)]
+            if not own:
+                continue
+            if prev_pids is None:
+                prev_pids = {history.patch_id(s) for s in prev_commits if not history.is_merge(s)} - {None}
+            if all(history.patch_id(c) in prev_pids for c in own):  # D8
+                shipped.append(
+                    LeftOut(n, f"already shipped: each of its {len(own)} own commits has a patch-id among "
+                               f"the commits reachable from {prev}")
+                )
+        for s in shipped:
+            listed.pop(s.number)
+
+    # R6 titles and groups, R7 breaking changes.
+    groups: dict[str, list[PullEntry]] = {g: [] for g in GROUP_ORDER}
+    for n in sorted(listed):
+        e = listed[n]
+        pr = prs.get(n)
+        e.own = own_commits.get(n, [])
+        source = next((s for s in e.commits if s in history.github), None) or next(iter(e.originals), None)
+        if source is not None:
+            if history.github[source].route == "merge-default-title":  # D17
+                if pr is not None and pr.title:
+                    title = pr.title
+                else:
+                    lines = history.body(source).splitlines()
+                    title = lines[0] if lines else history.commits[source].subject
+                    warnings.append(f"#{n}: a merge at GitHub's default title, and GitHub gives no title for it")
+            else:
+                title = strip_suffix(history.commits[source].subject)
+        else:
+            title = pr.title if pr is not None else ""
+        e.title = title
+        cc = conventional(title)
+        e.type = cc.type
+        messages = [history.message(s) for s in e.commits + e.own]
+        if cc.bang:
+            e.breaking.append("! in the title")
+        if any(BREAKING_LINE.search(m) for m in messages):
+            e.breaking.append("a BREAKING CHANGE footer in a commit message")
+        if pr is not None and BREAKING_LINE.search(pr.body):
+            e.breaking.append("a BREAKING CHANGE footer in the pull request's body")
+        if e.breaking:
+            e.group = "Breaking changes"
+        elif cc.type in GROUP_OF_TYPE:
+            e.group = GROUP_OF_TYPE[cc.type]
+        else:
+            e.group = "Other changes"
+        e.line = title if e.group == "Other changes" or cc.type is None else cc.desc
+        groups[e.group].append(e)
+
+    if prev and version_key(tag)[0] > version_key(prev)[0] and not groups["Breaking changes"]:
+        warnings.append(f"{tag} raises the major version and lists no breaking change")
+
+    return Result(
+        tag=tag,
+        prev=prev,
+        commit_count=len(rng),
+        groups={g: v for g, v in groups.items() if v},
+        direct=direct,
+        bookkeeping=bookkeeping,
+        carriers=sorted(carriers.values(), key=lambda x: x.number),
+        shipped=shipped,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The Highlights paragraph
+# --------------------------------------------------------------------------- #
+
+
+def highlight_entries(result: Result, prs: dict[int, PullRequest]) -> list[tuple[str, str, str]]:
+    """(key, head, body) for every entry of the list, in the list's order."""
+    entries = []
+    for e in result.listed:
+        pr = prs.get(e.number)
+        title = pr.title if pr is not None and pr.title else e.title
+        entries.append((f"#{e.number}", f"#{e.number} {title}", pr.body if pr is not None else ""))
+    for d in result.direct:
+        entries.append((d.sha[:7], f"{d.sha[:7]} {d.subject}", d.body))
+    return entries
+
+
+def share(available: int, lengths: list[int]) -> list[int]:
+    """Divide available characters among bodies of these lengths: a body shorter than
+    its fair share keeps its length, and what it leaves goes to the longer ones."""
+    allot = [0] * len(lengths)
+    if available <= 0:
+        return allot
+    left, remaining = available, len(lengths)
+    for i in sorted(range(len(lengths)), key=lambda i: lengths[i]):
+        allot[i] = min(lengths[i], left // remaining)
+        left -= allot[i]
+        remaining -= 1
+    return allot
+
+
+def highlights_input(entries: list[tuple[str, str, str]], cap: int = MAX_INPUT_CHARS) -> str:
+    """Every entry's title or subject first, then the bodies, sharing what remains of the
+    cap. The titles are never cut, so no entry is lost; should they alone exceed the
+    cap, the bodies are left out."""
+    heads = "\n".join(f"- {head}" for _, head, _ in entries) if entries else "(nothing is listed)"
+    bodies = [(key, body.strip()) for key, _, body in entries if body.strip()]
+    labels = [f"\n\n--- {key}\n" for key, _ in bodies]
+    available = cap - len(heads) - sum(len(label) for label in labels)
+    parts = [heads]
+    for (_, body), label, k in zip(bodies, labels, share(available, [len(b) for _, b in bodies]), strict=True):
+        if len(body) <= k:
+            parts.append(label + body)
+        elif k > len(SHORTENED):
+            parts.append(label + body[: k - len(SHORTENED)].rstrip() + SHORTENED)
+    return "".join(parts)
+
+
+def highlights_prompt(name: str, description: str, tag: str, prev: str | None, changes: str) -> str:
+    framing = f"This is the FIRST tagged release of {name}." if prev is None else f"This release ({tag}) follows {prev}."
+    project = f"{name} — {description}" if description else name
+    return (
+        f"You are writing the 'Highlights' paragraph for the CHANGELOG entry of {name} {tag}.\n\n"
+        f"Project: {project}\n"
+        f"{framing}\n\n"
+        "The changes in this release are below: first one line for each change (a pull request, by its "
+        "number and title, or a commit made without a pull request, by its short hash and subject), then "
+        "the description of each change, some shortened to fit. Write a TIGHT prose paragraph summarising "
+        "what is most USER-VISIBLE in this release. Constraints:\n"
+        "- Two or three sentences. Hard maximum: four sentences.\n"
+        "- Prose only. No bullet points. No headings. No code fences.\n"
+        "- Do not restate the version number in the prose.\n"
+        "- Do not invent features that aren't in the changes below.\n"
+        "- If the release is purely internal/maintenance, say so honestly in one sentence.\n"
+        "- Plain factual tone. No marketing language ('exciting', 'powerful', 'seamless', etc).\n"
+        "- For an initial release summarising a lot of foundational work, prefer compressing "
+        "into one dense sentence over running long — better to undersell than to truncate.\n\n"
+        f"=== CHANGES ===\n{changes}\n=== END OF CHANGES ===\n\n"
+        "Output ONLY the paragraph, nothing else."
+    )
+
+
+def highlights(prompt: str, warnings: list[str]) -> tuple[str, str]:
+    """(the paragraph, what wrote it). Every failure gives the placeholder and a warning;
+    the release ships either way."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        warnings.append("ANTHROPIC_API_KEY is not set, so no Highlights call was made; the placeholder is used")
+        return PLACEHOLDER, "the placeholder"
+    try:
+        import anthropic  # only here: the rest of the script needs the standard library alone
+    except ImportError as e:
+        warnings.append(f"the anthropic SDK cannot be imported ({e}); the placeholder is used")
+        return PLACEHOLDER, "the placeholder"
+    try:
+        client = anthropic.Anthropic()  # the key is read from the environment by the SDK
+        response = client.beta.messages.create(
+            model=HIGHLIGHTS_MODEL,
+            max_tokens=HIGHLIGHTS_MAX_TOKENS,
+            output_config={"effort": HIGHLIGHTS_EFFORT},
+            betas=[HIGHLIGHTS_BETA],
+            fallbacks="default",
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:  # any failure of the call: the placeholder, and the release ships
+        warnings.append(f"the Highlights call failed ({type(e).__name__}: {e}); the placeholder is used")
+        return PLACEHOLDER, "the placeholder"
+    stop = getattr(response, "stop_reason", None)
+    if stop == "refusal":  # checked before the content is read
+        category = getattr(getattr(response, "stop_details", None), "category", None)
+        warnings.append(
+            f"the Highlights call was refused (stop_reason refusal, category {category or 'not given'}); "
+            "the placeholder is used"
+        )
+        return PLACEHOLDER, "the placeholder"
+    text = "".join(
+        getattr(block, "text", "") for block in (getattr(response, "content", None) or [])
+        if getattr(block, "type", None) == "text"
+    ).strip()
+    if stop == "max_tokens":
+        warnings.append(
+            f"the Highlights call stopped at max_tokens ({HIGHLIGHTS_MAX_TOKENS}); "
+            + ("the paragraph may be cut short" if text else "it returned no text, so the placeholder is used")
+        )
+    elif stop not in ("end_turn", "stop_sequence"):
+        warnings.append(f"the Highlights call stopped with stop_reason {stop}")
+    if not text:
+        if stop != "max_tokens":
+            warnings.append("the Highlights call returned no text; the placeholder is used")
+        return PLACEHOLDER, "the placeholder"
+    return text, str(getattr(response, "model", None) or HIGHLIGHTS_MODEL)
+
+
+def project_meta(git: Git, tag: str, fallback_name: str) -> tuple[str, str]:
+    """The project's name and description from its manifest at the tag, else the repository's name."""
+    readers = (
+        ("pyproject.toml", lambda t: tomllib.loads(t).get("project")),
+        ("package.json", lambda t: json.loads(t)),
+        ("Cargo.toml", lambda t: tomllib.loads(t).get("package")),
+    )
+    for path, read in readers:
+        text = git.blob(f"refs/tags/{tag}", path)
+        if text is None:
+            continue
+        try:
+            table = read(text)
+        except (tomllib.TOMLDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(table, dict) and isinstance(table.get("name"), str) and table["name"]:
+            description = table.get("description")
+            return table["name"], description if isinstance(description, str) else ""
+    return fallback_name, ""
+
+
+# --------------------------------------------------------------------------- #
+# Sections, CHANGELOG.md and the job summary
+# --------------------------------------------------------------------------- #
+
+
+def section_heading(tag: str) -> re.Pattern[str]:
+    return re.compile(rf"^## \[?{re.escape(tag)}\]?(\s|$)")
+
+
+def section_of(text: str, tag: str) -> str | None:
+    """The section for the tag, from its heading to the next "## " heading, or None."""
+    heading = section_heading(tag)
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if heading.match(line):
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].startswith("## ")), len(lines))
+            return "\n".join(lines[i:end]).rstrip() + "\n"
+    return None
+
+
+def insert_section(text: str, section: str) -> str:
+    """The section below "## [Unreleased]"; without that, below the title; else at the top."""
+    m = re.search(r"^## \[Unreleased\][^\n]*(\n|$)", text, flags=re.MULTILINE) or re.search(
+        r"^# [^\n]*(\n|$)", text, flags=re.MULTILINE
+    )
+    head, tail = (text[: m.end()], text[m.end() :]) if m else ("", text)
+    head, tail = head.rstrip("\n"), tail.lstrip("\n")
+    out = (head + "\n\n" if head else "") + section.rstrip("\n") + "\n"
+    return out + ("\n" + tail if tail else "")
+
+
+def assemble(tag: str, date: str, paragraph: str, listing: str) -> str:
+    return f"## [{tag}] - {date}\n\n### Highlights\n\n{paragraph.strip()}\n\n{listing}\n"
+
+
+def own_version() -> str:
+    """dev-tools' version, from the VERSION.txt of the checkout this script runs from."""
+    try:
+        return (Path(__file__).resolve().parents[1] / "VERSION.txt").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def summary_markdown(repo: Repository, version: str, result: Result, written_by: str) -> str:
+    out = [
+        f"## {PROG}: {result.tag}",
+        "",
+        f"- dev-tools: {version}",
+        f"- Repository: {repo.slug or repo.name}",
+        f"- Range: `{result.range_text}`, {result.commit_count} commits",
+        f"- Listed: {len(result.listed)} pull requests, {len(result.direct)} direct commits",
+        f"- Highlights: {written_by}",
+    ]
+
+    def block(title: str, items: list[str]) -> None:
+        out.extend(["", f"### {title}", ""])
+        out.extend(items or ["- none"])
+
+    block(
+        "Listed pull requests",
+        [
+            f"- #{e.number}, {e.group}: "
+            + "; ".join(
+                f"{ROUTES[route]} {sha[:10]}" + (f" of {orig[:10]}" if route.startswith("cherry-pick") else "")
+                for route, sha, orig in zip(e.routes, e.commits, _originals(e), strict=True)
+            )
+            + (f", absorbing {len(e.own)} own commits" if e.own else "")
+            + (f" (breaking: {', '.join(e.breaking)})" if e.breaking else "")
+            for e in result.listed
+        ],
+    )
+    block("Direct commits", [f"- {d.sha[:7]} {d.subject}: {d.note}" for d in result.direct])
+    block(
+        "Left out",
+        [f"- #{c.number}: {c.why}" for c in result.carriers] + [f"- #{s.number}: {s.why}" for s in result.shipped],
+    )
+    block("Bookkeeping", [f"- {b.sha[:7]} {b.subject}: {b.reason}" for b in result.bookkeeping])
+    block("Warnings", [f"- {w}" for w in result.warnings])
+    return "\n".join(out) + "\n"
+
+
+def _originals(e: PullEntry) -> list[str]:
+    """The original commit for each cherry-pick route, "" for the others, aligned with e.routes."""
+    it = iter(e.originals)
+    return [next(it, "") if route.startswith("cherry-pick") else "" for route in e.routes]
+
+
+def emit_summary(markdown: str) -> None:
+    """Print the report, and append it to the job summary when GITHUB_STEP_SUMMARY is set.
+
+    In a workflow the report goes between ::group:: markers, with workflow commands
+    stopped around it, since titles and subjects are the repository's text, not the
+    script's."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        token = os.urandom(16).hex()
+        print(f"::group::{PROG} job summary")
+        print(f"::stop-commands::{token}")
+        print(markdown, end="")
+        print(f"::{token}::")
+        print("::endgroup::")
+    else:
+        print(markdown, end="")
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(markdown)
+        except OSError as e:
+            print(f"{PROG}: warning: the job summary cannot be written: {e}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# The modes
+# --------------------------------------------------------------------------- #
+
+
+def tag_from(explicit: str | None) -> str | None:
+    """--tag, else the tag of a tag push's GITHUB_REF, else None."""
+    if explicit is not None:
+        if not TAG_RE.match(explicit):
+            raise UsageError(f"--tag {explicit!r} is not a vX.Y.Z tag")
+        return explicit
+    ref = os.environ.get("GITHUB_REF", "")
+    if ref.startswith("refs/tags/"):
+        tag = ref.removeprefix("refs/tags/")
+        if not TAG_RE.match(tag):
+            raise UsageError(f"GITHUB_REF names the tag {tag!r}, which is not a vX.Y.Z tag")
+        return tag
+    return None
+
+
+def generate(repo: Repository, tag: str, reuse_committed: bool) -> None:
+    git = Git(repo.root)
+    if git.run("rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}", check=False).returncode != 0:
+        raise UsageError(f"no tag {tag} in {repo.root}")
+    version = own_version()
+    print(f"{PROG} {version} (dev-tools), for {repo.slug or repo.name} {tag}")
+    body_path = repo.root / RELEASE_BODY
+    if reuse_committed:
+        committed = git.blob("refs/remotes/origin/main", CHANGELOG)
+        section = section_of(committed, tag) if committed is not None else None
+        if section is not None:
+            body_path.write_text(section, encoding="utf-8")
+            print(
+                f"generate: {CHANGELOG} on origin/main already holds the section for {tag}; "
+                f"{RELEASE_BODY} is that section, unchanged, and no model call was made"
+            )
+            emit_summary(
+                f"## {PROG}: {tag}\n\n- dev-tools: {version}\n- Repository: {repo.slug or repo.name}\n"
+                f"- The section for {tag} was already in {CHANGELOG} on origin/main; {RELEASE_BODY} "
+                "was written from it unchanged, with no model call.\n"
+            )
+            return
+    prs = read_pull_requests(repo)
+    result = build_list(git, prs, tag)
+    name, description = project_meta(git, tag, repo.name)
+    changes = highlights_input(highlight_entries(result, prs))
+    paragraph, written_by = highlights(highlights_prompt(name, description, tag, result.prev, changes), result.warnings)
+    date = git.out("log", "-1", "--format=%cs", f"refs/tags/{tag}").strip()
+    body_path.write_text(assemble(tag, date, paragraph, result.render()), encoding="utf-8")
+    print(
+        f"generate: wrote {RELEASE_BODY} for {tag} (range {result.range_text}, {result.commit_count} commits): "
+        f"{len(result.listed)} pull requests, {len(result.direct)} direct commits, "
+        f"{len(result.bookkeeping)} bookkeeping commits left out"
+    )
+    emit_summary(summary_markdown(repo, version, result, written_by))
+    if result.warnings:
+        print(f"{PROG}: {len(result.warnings)} warnings, listed in the summary", file=sys.stderr)
+
+
+def insert(repo: Repository, tag: str | None) -> None:
+    body_path = repo.root / RELEASE_BODY
+    if not body_path.is_file():
+        raise UsageError(f"{RELEASE_BODY} not found in {repo.root}: run --mode=generate first")
+    try:
+        section = body_path.read_text(encoding="utf-8").rstrip() + "\n"
+    except (OSError, UnicodeDecodeError) as e:
+        raise ChangelogError(f"{RELEASE_BODY} cannot be read: {e}") from None
+    m = SECTION_HEAD_RE.match(section)
+    if not m:
+        raise ChangelogError(f"{RELEASE_BODY} does not begin with a '## [vX.Y.Z]' section heading")
+    if tag is not None and m[1] != tag:
+        raise ChangelogError(f"{RELEASE_BODY} holds the section for {m[1]}, not for {tag}")
+    path = repo.root / CHANGELOG
+    text = path.read_text(encoding="utf-8") if path.exists() else CHANGELOG_SKELETON
+    if section_of(text, m[1]) is not None:
+        print(f"insert: {CHANGELOG} already holds a section for {m[1]}; nothing to do")
+        return
+    path.write_text(insert_section(text, section), encoding="utf-8")
+    print(f"insert: added the section for {m[1]} to {CHANGELOG}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog=PROG, description="Generate a release's changelog section from its history and its pull requests."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("generate", "insert", "both"),
+        default="both",
+        help="generate writes release-body.md; insert adds it to CHANGELOG.md; both runs them in order",
+    )
+    parser.add_argument("--tag", metavar="vX.Y.Z", help="the release (default: the tag of GITHUB_REF)")
+    parser.add_argument("--repo", metavar="DIR", default=".", help="the repository's root (default: .)")
+    parser.add_argument(
+        "--reuse-committed",
+        action="store_true",
+        help="generate: take the tag's section from CHANGELOG.md on origin/main when it is already there",
+    )
+    args = parser.parse_args(argv)
+    try:
+        repo = resolve_repository(args.repo)
+        tag = tag_from(args.tag)
+        if args.mode in ("generate", "both"):
+            if tag is None:
+                raise UsageError("no tag: pass --tag vX.Y.Z, or run on a tag push (GITHUB_REF=refs/tags/vX.Y.Z)")
+            generate(repo, tag, args.reuse_committed)
+        if args.mode in ("insert", "both"):
+            insert(repo, tag)
+    except UsageError as e:
+        print(f"{PROG}: error: {e}", file=sys.stderr)
+        return 2
+    except ChangelogError as e:
+        print(f"{PROG}: error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
