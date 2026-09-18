@@ -31,8 +31,9 @@ Modes
   both      generate, then insert (the default).
 
 The tag comes from --tag, else from GITHUB_REF on a tag push; with neither,
-generate refuses and exits with status 2. --tag serves every run outside a tag
-push: a local run, a dry run, and the repair of a failed release.
+the script refuses in every mode and exits with status 2. --tag serves every
+run outside a tag push: a local run, a dry run, and the repair of a failed
+release.
 
 With --reuse-committed, which the release workflow passes, generate first looks
 in CHANGELOG.md on origin/main: when a section for the tag is already there, it
@@ -1296,7 +1297,7 @@ def generate(repo: Repository, tag: str, reuse_committed: bool) -> None:
         print(f"{PROG}: {len(result.warnings)} warnings, listed in the summary", file=sys.stderr)
 
 
-def insert(repo: Repository, tag: str | None) -> None:
+def insert(repo: Repository, tag: str) -> None:
     body_path = repo.root / RELEASE_BODY
     if not body_path.is_file():
         raise UsageError(f"{RELEASE_BODY} not found in {repo.root}: run --mode=generate first")
@@ -1307,7 +1308,7 @@ def insert(repo: Repository, tag: str | None) -> None:
     m = SECTION_HEAD_RE.match(section)
     if not m:
         raise ChangelogError(f"{RELEASE_BODY} does not begin with a '## [vX.Y.Z]' section heading")
-    if tag is not None and m[1] != tag:
+    if m[1] != tag:
         raise ChangelogError(f"{RELEASE_BODY} holds the section for {m[1]}, not for {tag}")
     path = repo.root / CHANGELOG
     text = path.read_text(encoding="utf-8") if path.exists() else CHANGELOG_SKELETON
@@ -1339,9 +1340,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repo = resolve_repository(args.repo)
         tag = tag_from(args.tag)
+        if tag is None:
+            raise UsageError("no tag: pass --tag vX.Y.Z, or run on a tag push (GITHUB_REF=refs/tags/vX.Y.Z)")
         if args.mode in ("generate", "both"):
-            if tag is None:
-                raise UsageError("no tag: pass --tag vX.Y.Z, or run on a tag push (GITHUB_REF=refs/tags/vX.Y.Z)")
             generate(repo, tag, args.reuse_committed)
         if args.mode in ("insert", "both"):
             insert(repo, tag)

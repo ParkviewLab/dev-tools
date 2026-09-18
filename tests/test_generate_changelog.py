@@ -1179,6 +1179,11 @@ class CommandLineTests(Fixture):
         self.assertEqual(code, 2)
         self.assertIn("no tag", err)
         self.assertFalse((self.repo.path / "release-body.md").exists())
+        (self.repo.path / "release-body.md").write_text("## [v0.1.0] - 2026-09-18\n\nx\n", encoding="utf-8")
+        code, _, err = self.run_main("--mode=insert", "--repo", str(self.repo.path))
+        self.assertEqual(code, 2)
+        self.assertIn("no tag", err)
+        self.assertFalse((self.repo.path / "CHANGELOG.md").exists())
 
     def test_a_tag_that_is_not_a_release_or_does_not_exist(self) -> None:
         code, _, err = self.run_main("--mode=generate", "--tag", "0.1.0", "--repo", str(self.repo.path))
@@ -1196,14 +1201,14 @@ class CommandLineTests(Fixture):
 
     def test_insert_run_twice_adds_one_section(self) -> None:
         self.assertEqual(self.run_main("--mode=generate", *self.args)[0], 0)
-        code, out, _ = self.run_main("--mode=insert", "--repo", str(self.repo.path))
+        code, out, _ = self.run_main("--mode=insert", *self.args)
         self.assertEqual(code, 0)
         self.assertIn("added the section for v0.1.0", out)
         changelog = (self.repo.path / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertTrue(changelog.startswith(gc.CHANGELOG_SKELETON + "\n## [v0.1.0] - "))
         self.assertTrue(changelog.endswith("- Greet by name (#1)\n\n### Direct commits\n\n"
                                            f"- chore: initial commit ({self.repo.git('rev-list', '--max-parents=0', 'HEAD')[:7]})\n"))
-        code, out, _ = self.run_main("--mode=insert", "--repo", str(self.repo.path))
+        code, out, _ = self.run_main("--mode=insert", *self.args)
         self.assertEqual(code, 0)
         self.assertIn("already holds a section for v0.1.0; nothing to do", out)
         self.assertEqual((self.repo.path / "CHANGELOG.md").read_text(encoding="utf-8"), changelog)
@@ -1213,7 +1218,7 @@ class CommandLineTests(Fixture):
         existing = "# Changelog\n\nPreamble.\n\n## [Unreleased]\n\n## [v0.0.9] - 2026-01-01\n\n- old\n"
         (self.repo.path / "CHANGELOG.md").write_text(existing, encoding="utf-8")
         (self.repo.path / "release-body.md").write_text("## [v0.1.0] - 2026-09-18\n\n### Highlights\n\nNew.\n", encoding="utf-8")
-        self.assertEqual(self.run_main("--mode=insert", "--repo", str(self.repo.path))[0], 0)
+        self.assertEqual(self.run_main("--mode=insert", *self.args)[0], 0)
         self.assertEqual(
             (self.repo.path / "CHANGELOG.md").read_text(encoding="utf-8"),
             "# Changelog\n\nPreamble.\n\n## [Unreleased]\n\n## [v0.1.0] - 2026-09-18\n\n### Highlights\n\nNew.\n\n"
@@ -1221,7 +1226,7 @@ class CommandLineTests(Fixture):
         )
 
     def test_insert_without_a_body_or_with_another_tags_body(self) -> None:
-        code, _, err = self.run_main("--mode=insert", "--repo", str(self.repo.path))
+        code, _, err = self.run_main("--mode=insert", *self.args)
         self.assertEqual(code, 2)
         self.assertIn("run --mode=generate first", err)
         (self.repo.path / "release-body.md").write_text("## [v0.0.9] - 2026-01-01\n\nstale\n", encoding="utf-8")

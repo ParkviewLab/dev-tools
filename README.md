@@ -166,7 +166,7 @@ generate-changelog [--mode generate|insert|both] [--tag vX.Y.Z] [--repo DIR] [--
 ```
 
 - `--mode`: `generate` writes the section to `release-body.md` at the repository root; `insert` puts `release-body.md` into `CHANGELOG.md` below `## [Unreleased]`, creating the file when it is absent, uses no network, and does nothing, saying so, when `CHANGELOG.md` already holds a section for the tag; `both`, the default, runs the two in order.
-- `--tag vX.Y.Z`: the release. On a tag push the workflow gives it through `GITHUB_REF`; `--tag` is for a local run, a dry run and the repair of a release whose changelog job failed. Published notes are not regenerated for past releases. Without a tag, generate refuses and exits with status 2.
+- `--tag vX.Y.Z`: the release. On a tag push the workflow gives it through `GITHUB_REF`; `--tag` is for a local run, a dry run and the repair of a release whose changelog job failed. Published notes are not regenerated for past releases. Without a tag, the script refuses in every mode and exits with status 2.
 - `--repo DIR`: the repository, by default the current directory, which must be the root of its git checkout. The script never reads the checkout it lives in, so a dev-tools checkout inside the workspace is not read; the only thing it takes from there is its own version, which it prints. The repository's GitHub address is read from the `origin` remote, else from `GITHUB_REPOSITORY`.
 - `--reuse-committed`: what the release workflow passes. When `CHANGELOG.md` on `origin/main` already holds the tag's section, generate writes that section to `release-body.md` unchanged, reads nothing from GitHub and makes no model call, so a re-run of a failed job creates the Release from the committed text.
 
