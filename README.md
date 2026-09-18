@@ -4,7 +4,7 @@ Shared developer tooling for repos under [`ParkviewLab/`](https://github.com/Par
 
 ## Install
 
-Clone once, run `install.sh`. The installer symlinks every **executable** script in `scripts/` into `~/.local/bin/`, so each is on `$PATH` under its file name: `git-<verb>` for the version helpers, `build-pages-site` for the site builder.
+Clone once, run `install.sh`. The installer symlinks every **executable** script in `scripts/` into `~/.local/bin/`, so each is on `$PATH` under its file name: `git-<verb>` for the version helpers, `build-pages-site` for the site builder, `generate-changelog` for the release notes.
 
 ```bash
 git clone git@github.com:ParkviewLab/dev-tools.git ~/dev-tools
@@ -19,8 +19,9 @@ Updates: `git pull`. Because the installer **symlinks** (not copies), a changed 
 - `~/.local/bin` on `$PATH` (default on most modern macOS / Linux setups).
 - Bash 4+ for the version helpers (`#!/usr/bin/env bash`).
 - `python3` (3.13) for `build-pages-site`, which uses the standard library only.
+- `uv` for `generate-changelog`, which runs under `uv run --script`: uv provides a Python of 3.11 or later and installs the `anthropic` SDK at the exact version the script declares, for its Highlights call. The script also needs git 2.38 or later, for `git merge-tree --write-tree`.
 - Per the repo's version source of truth: `uv` for `pyproject.toml`, `node`/`npm` for `package.json`, nothing extra for `VERSION.txt`.
-- `gh` (GitHub CLI) for `git dev-release`.
+- `gh` (GitHub CLI) for `git dev-release`, and for `generate-changelog`, which reads the repository's merged pull requests through it.
 
 ## The version helpers
 
@@ -156,6 +157,79 @@ The workflow checks the adopting repo out at `main` with its tags, checks dev-to
 
 Locally, `install.sh` links `build-pages-site` into `~/.local/bin` like the other scripts, so the same build runs from a repo's root (`build-pages-site --out /tmp/site --tag vX.Y.Z`); open the result with `python3 -m http.server` from that directory.
 
+## `generate-changelog` — a release's changelog section
+
+`generate-changelog` writes the changelog section of one release: a Highlights paragraph written by a model, and the list of what the release holds, built from the repository's history at the tag and its merged pull requests. A release workflow runs it from a checkout of dev-tools pinned to a release, so every repository's notes follow one rule, and the rule changes only with a dev-tools release.
+
+```bash
+generate-changelog [--mode generate|insert|both] [--tag vX.Y.Z] [--repo DIR] [--reuse-committed]
+```
+
+- `--mode`: `generate` writes the section to `release-body.md` at the repository root; `insert` puts `release-body.md` into `CHANGELOG.md` below `## [Unreleased]`, creating the file when it is absent, uses no network, and does nothing, saying so, when `CHANGELOG.md` already holds a section for the tag; `both`, the default, runs the two in order.
+- `--tag vX.Y.Z`: the release. On a tag push the workflow gives it through `GITHUB_REF`; `--tag` is for a local run, a dry run and the repair of a release whose changelog job failed. Published notes are not regenerated for past releases. Without a tag, generate refuses and exits with status 2.
+- `--repo DIR`: the repository, by default the current directory, which must be the root of its git checkout. The script never reads the checkout it lives in, so a dev-tools checkout inside the workspace is not read; the only thing it takes from there is its own version, which it prints. The repository's GitHub address is read from the `origin` remote, else from `GITHUB_REPOSITORY`.
+- `--reuse-committed`: what the release workflow passes. When `CHANGELOG.md` on `origin/main` already holds the tag's section, generate writes that section to `release-body.md` unchanged, reads nothing from GitHub and makes no model call, so a re-run of a failed job creates the Release from the committed text.
+
+The section reads `## [vX.Y.Z] - YYYY-MM-DD` (the tagged commit's date), then `### Highlights` and the paragraph, then the list. The exit status is 0 when the section was written, the placeholder paragraph included; 1 on a failure (git, or the read from GitHub); 2 on bad arguments.
+
+### The list
+
+The range runs from the previous release, the highest `vX.Y.Z` tag below this one by its three numbers, to the tag; a first release's range is the whole history. Every commit in it is accounted for:
+
+| A commit that is | Is |
+|---|---|
+| a pull request's squash commit or merge made by GitHub, or a cherry-pick of one (by its trailer, else by patch-id) | listed once, as its pull request, in the group of its title's type |
+| a commit of a pull request merged for real, its branch's merges included | part of that pull request, never listed on its own |
+| a promotion or back-merge pull request: head branch `develop`, `main` or `back-merge-vX.Y.Z`, from the repository itself | left out, since it carries work recorded elsewhere; its merge and the commits it brings are examined on their own |
+| a pull request the previous release already holds: one of its commits, a cherry-pick of one, or each of its own commits picked one by one | left out |
+| bookkeeping: a change of the project's own version value only, a change of `CHANGELOG.md` only, a merge equal to the automatic merge of its parents, a commit that changes nothing | left out, and reported in the job summary |
+| any other commit, a merge carrying an edit of its own included | listed under Direct commits, by subject and short hash |
+
+The groups, in order: Breaking changes (a `!` after the type, or a `BREAKING CHANGE:` footer in a commit message or in the pull request's body), Features (`feat`), Bug fixes (`fix`), Performance (`perf`), Refactor (`refactor`), Docs (`docs`), Tests (`test`), Reverts (`revert`), Maintenance (`build`, `chore`, `ci`, `style`), Other changes (any other title, shown in full), then Direct commits. A pull request's title is the first line of its squash commit or merge, without the `(#N)`, or, for a merge at GitHub's default title, the title GitHub records. A release with nothing to list reads `_No changes._`. The full rule, with the points it decides, is the script's docstring.
+
+The one read from GitHub is the repository's merged pull requests, through `gh`: with `GH_TOKEN` in a workflow, whose job then needs `pull-requests: read`, and with a person's own login locally. If it fails, the run fails and names the cause, since a list built without it would be wrong without saying so.
+
+### The Highlights paragraph
+
+`claude-opus-5` writes two to four sentences from the entries the list holds: the title and body of every listed pull request, as GitHub records them, and the subject and body of every direct commit. The input is capped at 50,000 characters, with every title first and the bodies shortened to share what remains, so no entry is lost to the cap. The key is `ANTHROPIC_API_KEY`. Without it, or when the call fails, is refused or answers nothing, the paragraph is a marked placeholder and the release ships; a call that stops at its output cap keeps its text and leaves a warning in the job summary. The `anthropic` SDK is imported inside that call alone, so everything else, the tests included, needs the standard library only.
+
+### The job summary
+
+The script prints a report, and appends it to the job summary when `GITHUB_STEP_SUMMARY` is set: the dev-tools version it ran from, the range, each listed pull request with the route by which it was recognised, the carriers and shipped pull requests it left out, the bookkeeping commits with their reasons, and its warnings. Warnings never enter the notes and never fail the run.
+
+### In a repo's release workflow
+
+The changelog job checks the repository out with its whole history and dev-tools into a subfolder at the commit of a pinned release, then runs the script twice: generate at the tag, and insert on a fresh `origin/main`.
+
+```yaml
+permissions:
+  contents: write         # commits CHANGELOG.md to main and creates the Release
+  pull-requests: read     # the merged pull requests the list is built from
+steps:
+  - uses: actions/checkout@v6
+    with:
+      fetch-depth: 0      # every branch and tag: the rule searches them all
+  - uses: actions/checkout@v6
+    with:
+      repository: ParkviewLab/dev-tools
+      ref: <the release's full commit SHA>   # vX.Y.Z
+      path: dev-tools
+  - uses: astral-sh/setup-uv@v8.1.0
+  - name: Generate release-body.md
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    run: uv run --script dev-tools/scripts/generate-changelog --mode=generate --reuse-committed
+  # then, on a fresh origin/main with release-body.md carried over:
+  #   uv run --script dev-tools/scripts/generate-changelog --mode=insert
+```
+
+The pin is the release's full commit SHA (`git rev-parse vX.Y.Z^{commit}`) with the tag in a comment on the same line, and it names a release whose own release run passed. A local run, such as a dry run or a repair, uses a dev-tools worktree at the pinned commit, not the clone that `install.sh` links.
+
+### Tests
+
+`tests/test_generate_changelog.py` builds each case of the rule in a temporary repository, GitHub's commits under GitHub's committer identity, supplies the pull requests as recorded JSON and stubs the model, so it runs offline in the test workflow. `tests/acceptance/` holds the acceptance run, which needs the network: it runs the script over every release of the ten repositories the rule was measured on and compares each list with the recorded result. It is made at the commit being tagged before every dev-tools release that changes the script, and each of its differences from the recording must be a ruled change; [its README](tests/acceptance/README.md) says how to run it.
+
 ## Release flow (in brief)
 
 Releases are tag-driven and cut from `main`; CI gates publish on the tag being reachable from `origin/main`. The full flow + rationale (why bump+tag on `main`, the back-merge cascade, the CI gate) lives in the **[handbook's `releases.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md)**. The one-liner:
@@ -172,7 +246,7 @@ dev-tools is itself a `VERSION.txt` repo and is **released with these very tools
 
 ## Adding a tool
 
-1. Drop the script (executable, with its shebang: `#!/usr/bin/env bash`, or `#!/usr/bin/env python3` for a standard-library Python script) into `scripts/`. Non-executable files (like `_sot.sh`) are *sourced*, not symlinked.
+1. Drop the script (executable, with its shebang: `#!/usr/bin/env bash`; `#!/usr/bin/env python3` for a standard-library Python script; or `#!/usr/bin/env -S uv run --script` for a Python script that declares a dependency at an exact version in its PEP 723 metadata and imports it only where it is used, so that its tests need the standard library alone) into `scripts/`. Non-executable files (like `_sot.sh`) are *sourced*, not symlinked.
 2. Document it here.
 3. PR onto `develop`. The bar: generic + cross-project, no project-specific logic. If it's only useful in one repo, it lives in that repo's `scripts/`.
 
