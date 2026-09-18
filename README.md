@@ -237,7 +237,7 @@ dev-tools is itself a `VERSION.txt` repo and is **released with these very tools
 
 ## License
 
-AGPL-3.0-or-later for the tooling (`scripts/**`, `install.sh`, CI); CC-BY-4.0 for the docs & repo meta. See [`LICENSING.md`](LICENSING.md).
+AGPL-3.0-or-later for the tooling and its tests (`scripts/**`, `tests/**`, `install.sh`, CI); CC-BY-4.0 for the docs, the Markdown under `tests/` included, and the repo meta. See [`LICENSING.md`](LICENSING.md).
 
 ---
 <sub>© 2026 Gary Frattarola · Licensed under [CC-BY-4.0](LICENSES/CC-BY-4.0.txt) · part of [ParkviewLab](https://github.com/ParkviewLab)</sub>
