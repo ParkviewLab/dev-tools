@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # /// script
-# requires-python = ">=3.11"
+# requires-python = "==3.13.*"
 # dependencies = ["anthropic==1.6.0"]
+# [tool.uv]
+# exclude-newer = "2026-09-16T00:00:00Z"
 # ///
 """Generate a release's changelog section from its history and its pull requests.
 
@@ -137,8 +139,10 @@ route by which it was recognised, the carriers and the pull requests already
 shipped that it left out, the bookkeeping commits with their reasons, and its
 warnings. Warnings never enter the notes and never fail the run.
 
-The inline metadata asks for Python 3.11 or later: the version files are read
-with tomllib, which Python 3.11 added (the SDK itself needs 3.10).
+The inline metadata fixes what uv installs: Python 3.13, the version the tests
+run on, and the SDK's own dependencies as PyPI held them at the exclude-newer
+date, which moves with the SDK pin. The script itself needs Python 3.11 or
+later, for tomllib.
 
 Exit codes:
   0  success, the placeholder paragraph included

@@ -19,7 +19,7 @@ Updates: `git pull`. Because the installer **symlinks** (not copies), a changed 
 - `~/.local/bin` on `$PATH` (default on most modern macOS / Linux setups).
 - Bash 4+ for the version helpers (`#!/usr/bin/env bash`).
 - `python3` (3.13) for `build-pages-site`, which uses the standard library only.
-- `uv` for `generate-changelog`, which runs under `uv run --script`: uv provides a Python of 3.11 or later and installs the `anthropic` SDK at the exact version the script declares, for its Highlights call. The script also needs git 2.38 or later, for `git merge-tree --write-tree`.
+- `uv` for `generate-changelog`, which runs under `uv run --script`: uv provides Python 3.13, downloading it where the machine has none, and installs the `anthropic` SDK at the exact version the script declares, with that SDK's dependencies as PyPI held them at the script's `exclude-newer` date, for its Highlights call. The script also needs git 2.38 or later, for `git merge-tree --write-tree`.
 - Per the repo's version source of truth: `uv` for `pyproject.toml`, `node`/`npm` for `package.json`, nothing extra for `VERSION.txt`.
 - `gh` (GitHub CLI) for `git dev-release`, and for `generate-changelog`, which reads the repository's merged pull requests through it.
 
@@ -246,7 +246,7 @@ dev-tools is itself a `VERSION.txt` repo and is **released with these very tools
 
 ## Adding a tool
 
-1. Drop the script (executable, with its shebang: `#!/usr/bin/env bash`; `#!/usr/bin/env python3` for a standard-library Python script; or `#!/usr/bin/env -S uv run --script` for a Python script that declares a dependency at an exact version in its PEP 723 metadata and imports it only where it is used, so that its tests need the standard library alone) into `scripts/`. Non-executable files (like `_sot.sh`) are *sourced*, not symlinked.
+1. Drop the script (executable, with its shebang: `#!/usr/bin/env bash`; `#!/usr/bin/env python3` for a standard-library Python script; or `#!/usr/bin/env -S uv run --script` for a Python script that declares a dependency at an exact version in its PEP 723 metadata, with `[tool.uv] exclude-newer` fixing that dependency's own dependencies, and imports it only where it is used, so that its tests need the standard library alone) into `scripts/`. Non-executable files (like `_sot.sh`) are *sourced*, not symlinked.
 2. Document it here.
 3. PR onto `develop`. The bar: generic + cross-project, no project-specific logic. If it's only useful in one repo, it lives in that repo's `scripts/`.
 
