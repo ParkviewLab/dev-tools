@@ -375,8 +375,10 @@ def read_pull_requests(repo: Repository) -> dict[int, PullRequest]:
 class Git:
     def __init__(self, root: Path) -> None:
         self.root = root
-        # A signature shown by a person's log configuration would break the parsing.
-        self.base = ["git", "-C", str(root), "-c", "log.showSignature=false"]
+        # A signature or colour shown by a person's configuration would break the parsing:
+        # a coloured diff gives git patch-id nothing to read. color.diff, not color.ui,
+        # since a person's color.diff=always outranks color.ui=false.
+        self.base = ["git", "-C", str(root), "-c", "log.showSignature=false", "-c", "color.diff=false"]
 
     def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         try:

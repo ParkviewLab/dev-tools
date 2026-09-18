@@ -522,6 +522,21 @@ class PickTests(Fixture):
         self.assertIn("each of its 2 own commits has a patch-id", later.shipped[0].why)
         self.assertEqual(later.render(), "_No changes._")
 
+    def test_a_colour_configuration_hides_no_patch_id(self) -> None:
+        # color.diff=always outranks color.ui=false; a coloured diff gives git patch-id nothing.
+        r = self.repo
+        r.git("config", "color.diff", "always")
+        s11 = self.squash(11, "fix: ensure the prebuilt is present", {"ci.sh": "prebuilt\n"})
+        self.branch_commits("parser", [("parser: edge case", {"a.py": "A = 2\n"})])
+        merge = self.real_merge(2, "fix: parser edge cases", "parser", "develop")
+        r.checkout("main")
+        r.pick(s11)
+        r.pick(merge, "-m", "1")
+        r.tag("v0.1.1")
+        hotfix = self.build("v0.1.1")
+        self.assertEqual(self.groups(hotfix), {"Bug fixes": [2, 11]})
+        self.assertEqual([e.routes for e in hotfix.groups["Bug fixes"]], [["cherry-pick (patch-id)"]] * 2)
+
     def test_a_real_merge_picked_only_in_part_is_listed_when_it_ships(self) -> None:
         e1, _ = self.branch_commits("exporter", [("exporter: module", {"d.py": "D = 1\n"}),
                                                  ("exporter: wiring", {"e.py": "E = 1\n"})])
