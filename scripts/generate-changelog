@@ -705,9 +705,11 @@ def merge_against_automatic(git: Git, sha: str, parents: tuple[str, ...]) -> tup
     tree = git.out("rev-parse", f"{sha}^{{tree}}").strip()
     if auto == tree and not conflicted:
         return True, "tree equals the automatic merge of its parents"
-    stat = git.out("diff", "--no-renames", "--stat=200", auto, tree).strip() if auto else ""
     files = sorted({ln for ln in lines[1:] if ln.strip()})
     what = f"automatic merge conflicts in {', '.join(files)}; " if conflicted else ""
+    if auto == tree:  # conflicted: D15 never counts it equal
+        return False, what + "the merge commits that conflicted result, conflict markers and all"
+    stat = git.out("diff", "--no-renames", "--stat=200", auto, tree).strip() if auto else ""
     return False, what + "differs from the automatic merge: " + (stat.replace("\n", " | ") or "(no textual diff)")
 
 

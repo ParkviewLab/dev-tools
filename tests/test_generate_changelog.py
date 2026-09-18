@@ -431,6 +431,17 @@ class AttributionTests(Fixture):
         self.assertEqual(self.groups(result), {"Features": [6]})
         self.assertTrue(any("claims #6, but GitHub records 0000000000" in w for w in result.warnings))
 
+    def test_a_pull_request_merged_into_a_feature_branch_stays_its_own(self) -> None:
+        # D5: a GitHub-made commit among a real merge's own commits stays its own pull request's.
+        self.branch_commits("feature/report", [("report: skeleton", {"report.py": "1\n"})])
+        self.squash(5, "fix: report handles empty input", {"empty.py": "5\n"}, base="feature/report")
+        self.real_merge(3, "feat: report command", "feature/report", "develop")
+        self.repo.tag("v0.1.0")
+        result = self.build("v0.1.0")
+        self.assertEqual(self.groups(result), {"Features": [3], "Bug fixes": [5]})
+        self.assertEqual(len(result.groups["Features"][0].own), 1)
+        self.assertEqual(self.direct(result), ["chore: initial commit"])
+
 
 # --------------------------------------------------------------------------- #
 # R2 (c) and R4: cherry-picks and pull requests already shipped
@@ -548,6 +559,22 @@ class PickTests(Fixture):
         later = self.build("v0.2.0")
         self.assertEqual(self.groups(later), {"Features": [3]})
 
+    def test_a_patch_id_shared_by_two_pull_requests_goes_to_the_lowest_number(self) -> None:
+        # D6: the same change merged as #3 into develop and as #8 into a maintenance branch;
+        # a copy of #8's commit on the release line is attributed to #3.
+        r = self.repo
+        s3 = self.squash(3, "fix: guard the parser", {"guard.txt": "guard\n"})
+        r.checkout("main")
+        r.checkout("maintenance", new=True)
+        s8 = self.squash(8, "fix: guard the parser on the 0.1 line", {"guard.txt": "guard\n"}, base="maintenance")
+        r.checkout("main")
+        r.pick(s8)
+        r.tag("v0.1.1")
+        hotfix = self.build("v0.1.1")
+        self.assertEqual(self.groups(hotfix), {"Bug fixes": [3]})
+        self.assertEqual(hotfix.groups["Bug fixes"][0].routes, ["cherry-pick (patch-id)"])
+        self.assertEqual(hotfix.groups["Bug fixes"][0].originals, [s3])
+
 
 # --------------------------------------------------------------------------- #
 # R3: carriers
@@ -637,6 +664,43 @@ class CarrierTests(Fixture):
         r.commit("init")
         history = gc.History(gc.Git(r.path), prs)
         self.assertEqual([n for n in sorted(prs) if history.is_carrier(n)], [1, 2, 3])
+
+    def test_a_carriers_merge_with_an_edit_of_its_own_is_listed_with_a_warning(self) -> None:
+        # R3, D10: the carrier is left out, and its merge, which differs from the automatic merge,
+        # is a direct commit.
+        r = self.repo
+        r.write("README.md", "x\n")
+        r.commit("chore: initial commit")
+        r.checkout("develop", new=True)
+        self.squash(1, "feat: first", {"one.py": "1\n"})
+        r.checkout("main")
+        r.git("merge", "-q", "--no-ff", "--no-commit", "develop")
+        r.write("README.md", "x, edited inside the promotion\n")
+        carrier = r.commit("Merge pull request #2 from example/develop\n\nRelease v0.1.0", committer=GH)
+        self.prs.append(rest_pr(2, "Release v0.1.0", carrier, base="main", head="develop"))
+        r.tag("v0.1.0")
+        result = self.build("v0.1.0")
+        self.assertEqual(self.groups(result), {"Features": [1]})
+        self.assertEqual(self.kept_out(result), ([2], []))
+        self.assertEqual(self.direct(result), ["chore: initial commit", "Merge pull request #2 from example/develop"])
+        self.assertEqual(result.bookkeeping, [])
+        self.assertTrue(any(w.startswith(f"{carrier[:10]} carrier #2's merge differs from the automatic merge: "
+                                         "README.md | 2 +-") for w in result.warnings))
+
+    def test_the_job_summary_reports_what_it_left_out(self) -> None:
+        r = self.repo
+        r.write("README.md", "x\n")
+        r.commit("chore: initial commit")
+        r.checkout("develop", new=True)
+        self.squash(1, "feat: first", {"one.py": "1\n"})
+        carrier = self.real_merge(2, "Release v0.1.0", "develop", "main", titled=False, base="main", head="develop")
+        r.tag("v0.1.0")
+        summary = self.tmp / "summary.md"
+        os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+        code, _, err = self.run_main("--mode=generate", "--tag", "v0.1.0", "--repo", str(r.path))
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"### Left out\n\n- #2: carrier (head develop), merge at GitHub's default title {carrier[:10]}\n",
+                      summary.read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -747,15 +811,85 @@ class BookkeepingTests(Fixture):
         text = UVLOCK.format(version="0.1.1", spec=">=2.31").replace('version = "2.32.3"', 'version = "2.32.4"')
         r.write("uv.lock", text)
         r.commit("a dependency's version line")  # a version line, but not the project's own
+        r.write("VERSION.txt", "0.1.1\n")
+        r.commit("add VERSION.txt")
+        (r.path / "VERSION.txt").unlink()
+        r.commit("drop VERSION.txt")  # deleted: never version-only (D12)
         r.tag("v0.1.0")
         result = self.build("v0.1.0")
         self.assertEqual(
             self.direct(result),
-            ["init", "add the manifest", "bump, and a new description", "add the lockfile", "a dependency's version line"],
+            ["init", "add the manifest", "bump, and a new description", "add the lockfile", "a dependency's version line",
+             "add VERSION.txt", "drop VERSION.txt"],
         )
         notes = {d.subject: d.note for d in result.direct}
+        self.assertEqual(notes["drop VERSION.txt"], "changes VERSION.txt")
         self.assertEqual(notes["bump, and a new description"], "pyproject.toml: a changed line is not a version line")
         self.assertEqual(notes["a dependency's version line"], "uv.lock: a value other than the project's own version changed")
+
+    def conflicting_branches(self) -> tuple[str, str]:
+        """main and a, each editing the same line of f.txt: (main's tip, a's tip)."""
+        r = self.repo
+        r.write("f.txt", "base\n")
+        r.commit("init")
+        r.checkout("a", new=True)
+        r.write("f.txt", "from a\n")
+        side = r.commit("a: edit f")
+        r.checkout("main")
+        r.write("f.txt", "from main\n")
+        return r.commit("main: edit f"), side
+
+    def test_a_merge_resolving_a_conflict_is_a_direct_commit(self) -> None:
+        # D15: the automatic merge conflicts, so the merge is listed with a warning.
+        r = self.repo
+        self.conflicting_branches()
+        with self.assertRaises(AssertionError):  # git merge stops on the conflict
+            r.git("merge", "-q", "--no-ff", "a")
+        r.write("f.txt", "from main, and from a\n")
+        resolved = r.commit("Merge a, resolved")
+        r.tag("v0.1.0")
+        result = self.build("v0.1.0")
+        merge = next(d for d in result.direct if d.sha == resolved)
+        self.assertTrue(merge.merge)
+        self.assertIn("automatic merge conflicts in f.txt; differs from the automatic merge: f.txt | 6 +-----", merge.note)
+        self.assertTrue(any(w.startswith(resolved[:10]) for w in result.warnings))
+        self.assertEqual(result.bookkeeping, [])
+
+    def test_a_conflicted_automatic_merge_never_equals_the_merge(self) -> None:
+        # D15: a merge committed with the automatic merge's own tree, conflict markers and all,
+        # is still not bookkeeping.
+        r = self.repo
+        first, side = self.conflicting_branches()
+        p = gc.Git(r.path).run("merge-tree", "--write-tree", first, side, check=False)
+        self.assertEqual(p.returncode, 1)
+        markers = r.git("commit-tree", p.stdout.splitlines()[0], "-p", first, "-p", side, "-m", "Merge a, markers and all")
+        r.git("reset", "-q", "--hard", markers)
+        r.tag("v0.1.0")
+        result = self.build("v0.1.0")
+        merge = next(d for d in result.direct if d.sha == markers)
+        self.assertIn("automatic merge conflicts in f.txt", merge.note)
+        self.assertIn("the merge commits that conflicted result, conflict markers and all", merge.note)
+        self.assertEqual(result.bookkeeping, [])
+
+    def test_a_merge_of_more_than_two_parents_is_never_bookkeeping(self) -> None:
+        # R5: an octopus merge is listed, with a warning.
+        r = self.repo
+        r.write("README.md", "x\n")
+        r.commit("init")
+        for name in ("b1", "b2"):
+            r.checkout("main")
+            r.checkout(name, new=True)
+            r.write(f"{name}.txt", f"{name}\n")
+            r.commit(f"{name}: add")
+        r.checkout("main")
+        r.git("merge", "-q", "--no-ff", "b1", "b2", "-m", "Merge b1 and b2")
+        octopus = r.head()
+        r.tag("v0.1.0")
+        result = self.build("v0.1.0")
+        merge = next(d for d in result.direct if d.sha == octopus)
+        self.assertEqual(merge.note, "3-parent merge: no automatic merge to compare with")
+        self.assertTrue(any(w.startswith(octopus[:10]) for w in result.warnings))
+        self.assertEqual(result.bookkeeping, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -1290,6 +1424,19 @@ class CommandLineTests(Fixture):
         self.assertIn("### Warnings\n\n- ` ANTHROPIC_API_KEY is not set", text)
         self.assertIn(f"generate-changelog {version} (dev-tools)", out)
 
+    def test_the_job_summary_reports_bookkeeping(self) -> None:
+        # D14 (ruling 9d): a commit that changes nothing is left out of the notes and reported in the job summary.
+        empty = self.repo.commit("chore: nothing at all", empty=True)
+        self.repo.git("tag", "-d", "v0.1.0")
+        self.repo.tag("v0.1.0")
+        summary = self.tmp / "summary.md"
+        os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+        code, _, err = self.run_main("--mode=generate", *self.args)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"### Bookkeeping\n\n- {empty[:7]} ` chore: nothing at all `: ` changes nothing: an empty commit `\n",
+                      summary.read_text(encoding="utf-8"))
+        self.assertNotIn("nothing at all", self.body())
+
     def test_repository_text_cannot_add_blocks_to_the_job_summary(self) -> None:
         summary = self.tmp / "summary.md"
         os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
@@ -1334,12 +1481,14 @@ class CommandLineTests(Fixture):
 class GitHubReadTests(Fixture):
     """The read through gh, against a stand-in gh on PATH."""
 
-    def fake_gh(self, output: str, status: int = 0) -> None:
+    def fake_gh(self, output: str, status: int = 0, error: str = "") -> None:
         bindir = self.tmp / "bin"
         bindir.mkdir()
         (self.tmp / "gh-output").write_text(output, encoding="utf-8")
+        (self.tmp / "gh-error").write_text(error, encoding="utf-8")
         gh = bindir / "gh"
-        gh.write_text(f'#!/bin/sh\necho "$@" > "{self.tmp}/gh-args"\ncat "{self.tmp}/gh-output"\nexit {status}\n')
+        gh.write_text(f'#!/bin/sh\necho "$@" > "{self.tmp}/gh-args"\ncat "{self.tmp}/gh-output"\n'
+                      f'cat "{self.tmp}/gh-error" >&2\nexit {status}\n')
         gh.chmod(0o755)
         os.environ["PATH"] = f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"
 
@@ -1362,6 +1511,13 @@ class GitHubReadTests(Fixture):
             gc.read_pull_requests(gc.Repository(self.repo.path, SLUG))
         self.assertIn("gh api exited 1", str(ctx.exception))
         self.assertIn("Bad credentials", str(ctx.exception))
+
+    def test_a_failed_read_names_the_cause_that_gh_writes_to_stderr(self) -> None:
+        # gh writes its error to stderr and the response body to stdout.
+        self.fake_gh('{"message":"Not Found","status":"404"}', status=1, error="gh: Not Found (HTTP 404)")
+        with self.assertRaises(gc.ChangelogError) as ctx:
+            gc.read_pull_requests(gc.Repository(self.repo.path, SLUG))
+        self.assertIn("gh api exited 1): gh: Not Found (HTTP 404)", str(ctx.exception))
 
     def test_a_deleted_fork_is_not_this_repository(self) -> None:
         obj = rest_pr(4, "feat: from a deleted fork", "4" * 40, head="main")
