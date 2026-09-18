@@ -534,6 +534,84 @@ class PickTests(Fixture):
         self.assertIn("each of its 2 own commits has a patch-id", later.shipped[0].why)
         self.assertEqual(later.render(), "_No changes._")
 
+    def test_a_real_merge_that_reapplies_a_reverted_change_is_listed(self) -> None:
+        # D8 counts copies, not ancestors: #7's own commit has the patch-id of #5's squash,
+        # which is its ancestor, so #7 re-applies what #6 removed and has not shipped.
+        r = self.repo
+        self.squash(5, "feat: widget", {"w.py": "W = 1\n"})
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.git("rm", "-q", "w.py")
+        s6 = r.commit('Revert "feat: widget" (#6)\n\n* Revert "feat: widget"', DEV, GH)
+        self.prs.append(rest_pr(6, 'Revert "feat: widget"', s6))
+        self.branch_commits("reapply", [('Revert "Revert "feat: widget""', {"w.py": "W = 1\n"})])
+        self.real_merge(7, 'Revert "Revert "feat: widget""', "reapply", "develop")
+        self.promote("v0.3.0")
+        result = self.build("v0.3.0")
+        self.assertEqual(self.groups(result), {"Other changes": [6, 7]})
+        self.assertEqual(self.kept_out(result), ([], []))
+
+    def test_a_revert_reverted_in_a_later_release_is_listed_there(self) -> None:
+        # Under real merges a reverted pull request comes back by reverting the revert:
+        # #5 ships in v0.2.0, its revert #6 in v0.3.0, and #7, the revert of #6, in v0.4.0.
+        r = self.repo
+        self.branch_commits("widget", [("add widget", {"w.py": "W = 1\n"})])
+        m5 = self.real_merge(5, "feat: widget", "widget", "develop")
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.checkout("revert-5", new=True)
+        r.git("revert", "--no-edit", "-m", "1", m5)
+        self.real_merge(6, 'Revert "feat: widget"', "revert-5", "develop")
+        self.promote("v0.3.0")
+        r.checkout("develop")
+        r.checkout("reapply-5", new=True)
+        r.git("revert", "--no-edit", r.git("rev-parse", "revert-5"))
+        self.real_merge(7, 'Revert "Revert "feat: widget""', "reapply-5", "develop")
+        self.promote("v0.4.0")
+        self.assertEqual(self.groups(self.build("v0.3.0")), {"Other changes": [6]})
+        later = self.build("v0.4.0")
+        self.assertEqual(self.groups(later), {"Other changes": [7]})
+        self.assertEqual(self.kept_out(later), ([], []))
+
+    def test_a_hand_made_redo_of_a_reverted_real_merge_is_listed(self) -> None:
+        # #7 re-picks both of #5's commits after #6 reverted #5's merge: each of #7's own
+        # commits has the patch-id of one of #5's, which are its ancestors, not copies of it.
+        r = self.repo
+        c5a, c5b = self.branch_commits("widget", [("add widget", {"w.py": "W = 1\n"}),
+                                                  ("add gadget", {"g.py": "G = 1\n"})])
+        m5 = self.real_merge(5, "feat: widget and gadget", "widget", "develop")
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.checkout("revert-5", new=True)
+        r.git("revert", "--no-edit", "-m", "1", m5)
+        self.real_merge(6, "revert: widget and gadget", "revert-5", "develop")
+        r.checkout("redo-5", new=True)
+        r.pick(c5a)
+        r.pick(c5b)
+        self.real_merge(7, "feat: widget and gadget again", "redo-5", "develop")
+        self.promote("v0.3.0")
+        result = self.build("v0.3.0")
+        self.assertEqual(self.groups(result), {"Features": [7], "Reverts": [6]})
+        self.assertEqual(self.kept_out(result), ([], []))
+
+    def test_a_real_merge_picked_commit_by_commit_through_a_hotfix_pull_request(self) -> None:
+        # D8 as ruled in 9b also covers picks that reach main on a branch merged for real:
+        # #9 lists the hotfix, and #3 is not listed again when its merge ships.
+        e1, e2 = self.branch_commits("exporter", [("exporter: module", {"d.py": "D = 1\n"}),
+                                                  ("exporter: wiring", {"e.py": "E = 1\n"})])
+        self.real_merge(3, "feat: exporter", "exporter", "develop")
+        self.repo.checkout("main")
+        self.repo.checkout("hotfix-exporter", new=True)
+        self.repo.pick(e1)
+        self.repo.pick(e2)
+        self.real_merge(9, "fix: ship the exporter early", "hotfix-exporter", "main", base="main")
+        self.repo.tag("v0.1.1")
+        self.assertEqual(self.groups(self.build("v0.1.1")), {"Bug fixes": [9]})
+        self.promote("v0.2.0")
+        later = self.build("v0.2.0")
+        self.assertEqual(self.groups(later), {})
+        self.assertEqual(self.kept_out(later), ([], [3]))
+
     def test_a_colour_configuration_hides_no_patch_id(self) -> None:
         # color.diff=always outranks color.ui=false; a coloured diff gives git patch-id nothing.
         r = self.repo

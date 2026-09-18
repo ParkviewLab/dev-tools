@@ -82,7 +82,9 @@ D18) are marked in the comments below:
   R4  A pull request is not listed when a commit attributed to it is reachable
       from the previous tag (D11), or when it was merged for real and every
       one of its own commits other than merges has a patch-id among the
-      commits reachable from the previous tag (D8).
+      commits reachable from the previous tag other than its own ancestors
+      (D8): an ancestor with its patch-id means that the commit re-applies a
+      change undone since, such as a revert reverted, which has not shipped.
   R5  Every other commit in the range is bookkeeping, left out, or a direct
       commit, listed. Bookkeeping is recognised by what a commit changes,
       never by its title: (i) a commit, not a merge, whose diff apart from
@@ -571,6 +573,13 @@ class History:
             return Attribution("cherry-pick (patch-id)", n, original)
         return None
 
+    def is_ancestor(self, a: str, b: str) -> bool:
+        """Whether commit a is reachable from commit b; a commit is its own ancestor."""
+        p = self.git.run("merge-base", "--is-ancestor", a, b, check=False)
+        if p.returncode not in (0, 1):
+            raise ChangelogError(f"git merge-base --is-ancestor {a} {b} failed: {p.stderr.strip()}")
+        return p.returncode == 0
+
 
 # --------------------------------------------------------------------------- #
 # Bookkeeping (R5)
@@ -913,7 +922,7 @@ def build_list(git: Git, prs: dict[int, PullRequest], tag: str) -> Result:
             a = history.attribute(sha)
             if a is not None and a.number not in evidence:
                 evidence[a.number] = f"{sha[:10]} ({ROUTES[a.route]})"
-        prev_pids: set[str] | None = None
+        prev_by_pid: dict[str, list[str]] | None = None
         for n in sorted(listed):
             if n in evidence:
                 shipped.append(LeftOut(n, f"already shipped: {evidence[n]} is reachable from {prev}"))
@@ -921,9 +930,20 @@ def build_list(git: Git, prs: dict[int, PullRequest], tag: str) -> Result:
             own = [c for c in own_commits.get(n, []) if not history.is_merge(c)]
             if not own:
                 continue
-            if prev_pids is None:
-                prev_pids = {history.patch_id(s) for s in prev_commits if not history.is_merge(s)} - {None}
-            if all(history.patch_id(c) in prev_pids for c in own):  # D8
+            if prev_by_pid is None:
+                prev_by_pid = {}
+                for s in prev_commits:
+                    pid = None if history.is_merge(s) else history.patch_id(s)
+                    if pid:
+                        prev_by_pid.setdefault(pid, []).append(s)
+            # D8: each own commit has a copy among the commits reachable from the previous tag.
+            # A commit with its patch-id that the own commit descends from is not a copy of it:
+            # the own commit re-applies a change undone since, such as a revert reverted, which
+            # has not shipped.
+            if all(
+                any(not history.is_ancestor(s, c) for s in prev_by_pid.get(history.patch_id(c) or "", []))
+                for c in own
+            ):
                 shipped.append(
                     LeftOut(n, f"already shipped: each of its {len(own)} own commits has a patch-id among "
                                f"the commits reachable from {prev}")
