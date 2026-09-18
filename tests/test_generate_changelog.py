@@ -683,6 +683,61 @@ class PickTests(Fixture):
         self.assertEqual(self.groups(result), {"Features": [7], "Reverts": [6]})
         self.assertEqual(self.kept_out(result), ([], []))
 
+    def test_a_direct_commit_that_reapplies_a_reverted_squash_is_listed(self) -> None:
+        # D6: a commit that descends from #5's squash re-applies its change rather than copying
+        # it, so it is a direct commit of the release that brings the change back, not #5 again.
+        r = self.repo
+        self.squash(5, "feat: widget", {"w.py": "W = 1\n"})
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.git("rm", "-q", "w.py")
+        s6 = r.commit("revert: widget (#6)\n\n* revert: widget", DEV, GH)
+        self.prs.append(rest_pr(6, "revert: widget", s6))
+        r.write("w.py", "W = 1\n")
+        r.commit("restore the widget")
+        self.promote("v0.3.0")
+        result = self.build("v0.3.0")
+        self.assertEqual(self.groups(result), {"Reverts": [6]})
+        self.assertEqual(self.direct(result), ["restore the widget"])
+        self.assertEqual(self.kept_out(result), ([], []))
+
+    def test_a_cherry_pick_that_reapplies_a_reverted_squash_is_listed(self) -> None:
+        # D6 on the trailer: git cherry-pick -x names #5's squash, which the pick descends from,
+        # so the pick re-applies it rather than copying it and is listed as a direct commit.
+        r = self.repo
+        s5 = self.squash(5, "feat: widget", {"w.py": "W = 1\n"})
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.git("rm", "-q", "w.py")
+        s6 = r.commit("revert: widget (#6)\n\n* revert: widget", DEV, GH)
+        self.prs.append(rest_pr(6, "revert: widget", s6))
+        again = r.pick(s5, "-x")
+        self.promote("v0.3.0")
+        result = self.build("v0.3.0")
+        self.assertEqual(self.groups(result), {"Reverts": [6]})
+        self.assertEqual(self.direct(result), ["feat: widget (#5)"])
+        self.assertEqual(self.kept_out(result), ([], []))
+        self.assertIn(f"- feat: widget (#5) ({again[:7]})", result.render())
+
+    def test_a_direct_commit_that_reapplies_a_reverted_real_merge_is_listed(self) -> None:
+        # D6 for a merge: the direct commit has the patch-id of #5's merge, which it descends
+        # from, so it re-applies the change that #6 reverted and is listed as a direct commit.
+        r = self.repo
+        self.branch_commits("widget", [("add widget", {"w.py": "W = 1\n"})])
+        m5 = self.real_merge(5, "feat: widget", "widget", "develop")
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.checkout("revert-5", new=True)
+        r.git("revert", "--no-edit", "-m", "1", m5)
+        self.real_merge(6, "revert: widget", "revert-5", "develop")
+        r.write("w.py", "W = 1\n")
+        r.commit("restore the widget")
+        self.promote("v0.3.0")
+        result = self.build("v0.3.0")
+        self.assertEqual(self.groups(result), {"Reverts": [6]})
+        self.assertEqual(self.direct(result), ["restore the widget"])
+        self.assertEqual(self.kept_out(result), ([], []))
+
     def test_a_branch_merged_by_hand_into_main_and_by_pull_request_into_develop_is_listed_once(self) -> None:
         # D6: the merge's own commit, reached only through its second parent, is not a copy
         # that precedes it, so it stays the pull request's.
