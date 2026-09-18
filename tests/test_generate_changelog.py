@@ -738,6 +738,35 @@ class PickTests(Fixture):
         self.assertEqual(self.direct(result), ["restore the widget"])
         self.assertEqual(self.kept_out(result), ([], []))
 
+    def test_the_warning_on_a_reapplication_ending_in_a_number_names_what_it_reapplies(self) -> None:
+        # A direct commit ending in (#5) that re-applies #5's change, found by its trailer or by
+        # its patch-id, is no copy under D6; its warning names the commit whose change it re-applies.
+        r = self.repo
+        s5 = self.squash(5, "feat: widget", {"w.py": "W = 1\n"})
+        self.promote("v0.2.0")
+        r.checkout("develop")
+        r.git("rm", "-q", "w.py")
+        s6 = r.commit("revert: widget (#6)\n\n* revert: widget", DEV, GH)
+        self.prs.append(rest_pr(6, "revert: widget", s6))
+        by_trailer = r.pick(s5, "-x")
+        r.git("rm", "-q", "w.py")
+        s7 = r.commit("revert: widget again (#7)\n\n* revert: widget again", DEV, GH)
+        self.prs.append(rest_pr(7, "revert: widget again", s7))
+        r.write("w.py", "W = 1\n")
+        by_patch_id = r.commit("feat: widget (#5)")
+        self.promote("v0.3.0")
+        result = self.build("v0.3.0")
+        self.assertEqual(self.groups(result), {"Reverts": [6, 7]})
+        self.assertEqual(self.direct(result), ["feat: widget (#5)", "feat: widget (#5)"])
+        self.assertEqual(
+            result.warnings,
+            [
+                f"{sha[:10]} ends in (#5) but re-applies the change of #5's commit {s5[:10]}, from which it "
+                "descends, rather than copying it; listed as a direct commit"
+                for sha in (by_trailer, by_patch_id)
+            ],
+        )
+
     def test_a_branch_merged_by_hand_into_main_and_by_pull_request_into_develop_is_listed_once(self) -> None:
         # D6: the merge's own commit, reached only through its second parent, is not a copy
         # that precedes it, so it stays the pull request's.

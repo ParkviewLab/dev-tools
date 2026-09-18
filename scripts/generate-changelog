@@ -76,7 +76,8 @@ D18) are marked in the comments below:
       belong to its pull request and are never listed on their own, except
       another pull request's commit of kind (a) or (b) among them (D5). A
       commit ending in (#N) that is none of these is not believed: it is a
-      direct commit, and the script warns.
+      direct commit, and the script warns, naming G when the commit re-applies
+      G's change.
   R3  A pull request from this repository, not a fork, whose head branch is
       develop, main or back-merge-vX.Y.Z carries work recorded elsewhere and
       is not listed (D9). Its merge is examined under R5 (iii) and its other
@@ -566,34 +567,51 @@ class History:
             return None  # D6: a merge is never a cherry-pick
         # D6: a commit counts as a copy of a GitHub-made commit only when that commit is not its
         # ancestor: a commit that descends from it re-applies its change, undone since.
-        for x in PICK_TRAILER.findall(self.message(sha)):  # D6: the trailer first
+        for full in self._named(sha):  # D6: the trailer first
+            if not self.is_ancestor(full, sha):
+                return Attribution("cherry-pick (trailer)", self.github[full].number, full)
+        # D6: nor can a copy precede what it copies. A GitHub-made commit whose first parent
+        # already holds this commit re-applies its change and is not its original; a real
+        # merge's own commit, reached only through its second parent, stays the merge's.
+        candidates = [
+            (n, s)
+            for n, s in self._same_patch(sha)
+            if not self.is_ancestor(sha, self.commits[s].parents[0]) and not self.is_ancestor(s, sha)
+        ]
+        if candidates:
+            n = min(m for m, _ in candidates)  # D6: several pull requests share it: the lowest number
+            original = next(s for m, s in candidates if m == n)
+            return Attribution("cherry-pick (patch-id)", n, original)
+        return None
+
+    def reapplied(self, sha: str) -> tuple[int, str] | None:
+        """For a commit that R2 (c) takes for no copy: the pull request and the GitHub-made
+        commit, its ancestor, whose change it re-applies, found by its trailer first and then
+        by its patch-id (the lowest number, as D6 chooses); None when it re-applies none."""
+        for full in self._named(sha):
+            if self.is_ancestor(full, sha):
+                return self.github[full].number, full
+        ancestors = sorted((n, s) for n, s in self._same_patch(sha) if self.is_ancestor(s, sha))
+        return ancestors[0] if ancestors else None
+
+    def _named(self, sha: str) -> list[str]:
+        """D6: the GitHub-made commits, of pull requests that are not carriers, that the
+        commit's "(cherry picked from commit X)" trailers name, in the message's order."""
+        named = []
+        for x in PICK_TRAILER.findall(self.message(sha)):
             p = self.git.run("rev-parse", "--verify", "--quiet", f"{x}^{{commit}}", check=False)
             full = p.stdout.strip()
-            if (
-                p.returncode == 0
-                and full in self.github
-                and not self.is_carrier(self.github[full].number)
-                and not self.is_ancestor(full, sha)
-            ):
-                return Attribution("cherry-pick (trailer)", self.github[full].number, full)
+            if p.returncode == 0 and full in self.github and not self.is_carrier(self.github[full].number):
+                named.append(full)
+        return named
+
+    def _same_patch(self, sha: str) -> list[tuple[int, str]]:
+        """D6: the number and commit of each GitHub-made commit, of a pull request that is not
+        a carrier, whose patch-id equals the commit's."""
         pid = self.patch_id(sha)
-        if pid and pid in self.pid_index:
-            # D6: nor can a copy precede what it copies. A GitHub-made commit whose first parent
-            # already holds this commit re-applies its change and is not its original; a real
-            # merge's own commit, reached only through its second parent, stays the merge's.
-            candidates = [
-                (a.number, s)
-                for s, a in self.github.items()
-                if a.number in self.pid_index[pid]
-                and self.patch_id(s) == pid
-                and not self.is_ancestor(sha, self.commits[s].parents[0])
-                and not self.is_ancestor(s, sha)
-            ]
-            if candidates:
-                n = min(m for m, _ in candidates)  # D6: several pull requests share it: the lowest number
-                original = next(s for m, s in candidates if m == n)
-                return Attribution("cherry-pick (patch-id)", n, original)
-        return None
+        if not pid or pid not in self.pid_index:
+            return []
+        return [(a.number, s) for s, a in self.github.items() if a.number in self.pid_index[pid] and self.patch_id(s) == pid]
 
     def is_ancestor(self, a: str, b: str) -> bool:
         """Whether commit a is reachable from commit b; a commit is its own ancestor."""
@@ -929,10 +947,17 @@ def build_list(git: Git, prs: dict[int, PullRequest], tag: str) -> Result:
             continue
         m = PR_SUFFIX.search(c.subject)
         if m:
-            warnings.append(
-                f"{sha[:10]} ends in (#{m[1]}) but is neither made by GitHub nor a cherry-pick of a "
-                "GitHub-made commit; listed as a direct commit"
-            )
+            again = history.reapplied(sha)
+            if again is not None:  # D6: it descends from the commit it would copy
+                warnings.append(
+                    f"{sha[:10]} ends in (#{m[1]}) but re-applies the change of #{again[0]}'s commit "
+                    f"{again[1][:10]}, from which it descends, rather than copying it; listed as a direct commit"
+                )
+            else:
+                warnings.append(
+                    f"{sha[:10]} ends in (#{m[1]}) but is neither made by GitHub nor a cherry-pick of a "
+                    "GitHub-made commit; listed as a direct commit"
+                )
         direct.append(DirectCommit(sha, c.subject, history.body(sha), False, detail))
 
     # R4: once only.
