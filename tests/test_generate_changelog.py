@@ -15,7 +15,8 @@ git is not installed.
 
 The measurement's histories (tests/acceptance/evidence/build_synthetic.py) are
 rebuilt here and checked against what was stated for them, with the correction of
-decision 9b; the acceptance run, which needs the network, is tests/acceptance/.
+ruling 9b (D8, 2026-09-18; tests/acceptance/README.md, Decided); the acceptance
+run, which needs the network, is tests/acceptance/.
 """
 
 from __future__ import annotations
@@ -514,7 +515,7 @@ class PickTests(Fixture):
         self.assertEqual(self.direct(later), [])
 
     def test_a_real_merge_picked_commit_by_commit_is_not_listed_again(self) -> None:
-        # D8, decision 9b: the picks are direct commits of the hotfix; the pull request
+        # D8, ruling 9b: the picks are direct commits of the hotfix; the pull request
         # counts as shipped once each of its own commits has a patch-id there.
         e1, e2 = self.branch_commits("exporter", [("exporter: module", {"d.py": "D = 1\n"}),
                                                   ("exporter: wiring", {"e.py": "E = 1\n"})])
@@ -602,7 +603,7 @@ class CarrierTests(Fixture):
         self.assertIn(f"({lone[:7]})", first.render())
         self.assertIn(f"({root[:7]})", first.render())
 
-        # #3, a back-merge from main; #4, the second proposal's back-merge branch
+        # #3, a back-merge from main; #4, a back-merge-vX.Y.Z head branch
         r.checkout("develop")
         self.real_merge(3, "Back-merge main into develop", "main", "develop", titled=False, head="main")
         r.checkout("main")
@@ -1075,7 +1076,7 @@ class SyntheticHistoryTests(Fixture):
             f"\n\n### Direct commits\n\n- build: cap requests below 3 ({pin[:7]})",
         )
 
-    def test_extra_scenario_with_decision_9b(self) -> None:
+    def test_extra_scenario_with_ruling_9b(self) -> None:
         r, spec = self.repo, ">=2.31"
         r.write("CHANGELOG.md", "# Changelog\n")
         r.commit("docs: start the changelog")
@@ -1119,7 +1120,7 @@ class SyntheticHistoryTests(Fixture):
             f"### Direct commits\n\n- exporter: module ({p1[:7]})\n- exporter: wiring ({p2[:7]})",
         )
         second = self.build("v1.1.0")
-        self.assertEqual(self.kept_out(second), ([], [2, 3]))  # the measurement listed #3 again; 9b does not
+        self.assertEqual(self.kept_out(second), ([], [2, 3]))  # the measurement listed #3 again; ruling 9b does not
         self.assertEqual(
             second.render(),
             f"### Direct commits\n\n- side: add f ({side[:7]})\n- Merge branch 'side' into develop ({edited[:7]})\n"

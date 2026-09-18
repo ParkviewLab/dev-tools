@@ -23,13 +23,16 @@ full
       equal, except where a ruling changed the rule since the measurement; each
       such difference is written out in RULED below, with its ruling;
     - a tag released after the measurement: the pull requests listed with the
-      expected set, computed as the measurement computed it: the pull requests
-      whose merge commit, as GitHub records it, lies in the release's range,
-      less the carriers (head branch develop, main or back-merge-vX.Y.Z, from the
-      repository itself).
+      expected set, computed by the measurement's method but with the carriers
+      as ruling 9a defines them: the pull requests whose merge commit, as GitHub
+      records it, lies in the release's range, less those from the repository
+      itself whose head branch is develop, main or back-merge-vX.Y.Z.
 
-    Writes the report (default: acceptance-report.md in --work) and exits 0 when
-    every tag passes, 1 otherwise.
+    Writes the report (default: acceptance-report.md in --work) and exits 0
+    when every tag passes and every recorded tag exists, 1 when a tag's list
+    differs from its basis, the script fails on a tag or a recorded tag is
+    missing, and 2 on bad arguments or when the run cannot go on (gh not on
+    PATH, or a git or gh command failing), in which case it writes no report.
 
 tag
     The same comparison for one tag of one clone: a disposable full clone,
@@ -42,7 +45,8 @@ release-check
     the release run's jobs in the order they ran, its attempt and the
     generate-changelog job summary found in the changelog job's log. The clone
     is fetched first, since the release job commits to main after the tag. All
-    of it is written to --report, for a reader to judge the pilot's criteria.
+    of it is written to --report, from which a reader judges the release's notes
+    by the criteria in tests/acceptance/README.md.
 """
 
 from __future__ import annotations
@@ -87,7 +91,8 @@ OLD_PLACEHOLDER = "_Highlights generation"  # the retired generator's placeholde
 SUMMARY_GROUP = "generate-changelog job summary"
 
 # Differences from the recording that a ruling made, keyed by repository and tag:
-# the list as the rule now gives it, and the ruling that changed it.
+# the list as the rule now gives it, and the ruling that changed it, each ruling
+# recorded, with its date and reason, under Decided in README.md.
 RULED = {
     ("cogrind-workshop", "v0.1.0"): (
         "### Maintenance\n\n"
@@ -95,7 +100,8 @@ RULED = {
         "- Adopt ParkviewLab handbook onboarding (CI, AI pointers, ty, .python-version) (#2)\n\n"
         "### Direct commits\n\n"
         "- Initial public release — cogrind-workshop (AGPL-3.0-or-later) (8208257)",
-        "decision 9a: carriers are recognised by head branch alone, so #1, a pull request from "
+        "ruling 9a of 2026-09-18 (D9; tests/acceptance/README.md, Decided): a carrier is recognised "
+        "by head branch alone, from the repository itself, so #1, a real change from "
         "ci-node24-action-pins into main, is listed under Maintenance, and its commit 958c3f5 no "
         "longer appears under Direct commits",
     ),
@@ -152,7 +158,10 @@ def gh_json_pages(path: str) -> list:
             i += 1
         if i >= len(out):
             return items
-        page, i = decoder.raw_decode(out, i)
+        try:
+            page, i = decoder.raw_decode(out, i)
+        except json.JSONDecodeError as e:
+            raise Failure(f"gh api --paginate {path} did not return JSON: {e}") from None
         items.extend(page)
 
 
