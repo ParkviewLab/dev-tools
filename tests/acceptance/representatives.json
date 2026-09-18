@@ -1,0 +1,54 @@
+{
+  "generated": "2026-09-18",
+  "source": "the 2026-09-18 ruling \"The real-history check, refining the NR01 ruling\" (proposal \"One changelog generator\")",
+  "profiles": [
+    {
+      "profile": "Python, GHCR only",
+      "repo": "paper-boxing",
+      "status": "active",
+      "reason": "the profile's representative under the ruling"
+    },
+    {
+      "profile": "Python, PyPI only",
+      "repo": "cogrind-workshop",
+      "status": "active",
+      "reason": "the profile's representative under the ruling"
+    },
+    {
+      "profile": "Python, PyPI and GHCR",
+      "repo": "smalt-mcp",
+      "status": "active",
+      "reason": "the largest history and the longest log among the profile's repositories, per the ruling"
+    },
+    {
+      "profile": "Node, npm and GHCR",
+      "repo": "jonobones",
+      "status": "active",
+      "reason": "the profile's representative under the ruling"
+    },
+    {
+      "profile": "Electron",
+      "repo": "pensa-grex",
+      "status": "active",
+      "reason": "the longer release history among the profile's repositories, per the ruling"
+    },
+    {
+      "profile": "Node, npm only",
+      "repo": null,
+      "status": "pending",
+      "reason": "no repository of this profile yet; it joins the set when its first repository does"
+    },
+    {
+      "profile": "Node, GHCR only",
+      "repo": null,
+      "status": "pending",
+      "reason": "no repository of this profile yet; it joins the set when its first repository does"
+    },
+    {
+      "profile": "Rust",
+      "repo": null,
+      "status": "pending",
+      "reason": "no repository of this profile yet; it joins the set when its first repository does"
+    }
+  ]
+}

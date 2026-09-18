@@ -1,7 +1,11 @@
 name: Test
 
-# The unit tests of scripts/build-pages-site: standard-library unittest on the
-# Python the docs-site workflow runs (3.13). See the handbook's ci.md.
+# The unit tests of scripts/build-pages-site and scripts/generate-changelog:
+# standard-library unittest on Python 3.13, with nothing installed. The
+# changelog script imports the anthropic SDK only inside its Highlights call,
+# which its tests stub, so they need no package and no network; the acceptance
+# run in tests/acceptance/ needs the network and gh logged in to GitHub, and
+# is not run here. See the handbook's ci.md.
 
 on:
   pull_request:
