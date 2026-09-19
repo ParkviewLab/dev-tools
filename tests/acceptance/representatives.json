@@ -1,6 +1,6 @@
 {
   "generated": "2026-09-18",
-  "source": "the 2026-09-18 ruling \"The real-history check, refining the NR01 ruling\" (proposal \"One changelog generator\")",
+  "source": "the 2026-09-18 ruling \"The real-history check, refining the NR01 ruling\" (proposal \"One changelog generator\"), relabelled by version file and publish target by T7 of the handbook plan \"release and dev-release jobs chosen by publish target\" (2026-09-18)",
   "profiles": [
     {
       "profile": "pyproject.toml, GHCR",
