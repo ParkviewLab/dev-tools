@@ -42,7 +42,7 @@
       "profile": "npm only",
       "repo": null,
       "status": "pending",
-      "reason": "no repository of this profile yet; it joins the set when its first repository does"
+      "reason": "no repository of this profile yet; it joins the set once its first repository has a vX.Y.Z release"
     }
   ]
 }

@@ -71,7 +71,7 @@ From a plain (non-dev) version, `<kind>` is just the normal increment.
 
 ### `git dev-release` — on-demand dev build
 
-Run from `develop`. Bumps the source of truth to the next **dev** version, commits, pushes `develop`, and dispatches the repo's `dev-release.yml` (which, for a Python repo, publishes a GHCR `:dev` image and `X.Y.Z.devN` to TestPyPI). For real releases use `git bump` / `git release`.
+Run from `develop`. Bumps the source of truth to the next **dev** version, commits, pushes `develop`, and dispatches the repo's `dev-release.yml`, which builds the dev counterpart of each of the repo's publish targets that has one (the handbook's [`releases.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md#development-versioning)); in a repo without that workflow the bump and the push still happen, and the dispatch fails. For real releases use `git bump` / `git release`.
 
 ```bash
 git dev-release patch       # next dev build toward the next patch
@@ -80,7 +80,7 @@ git dev-release --open      # open the next cycle post-release: X.Y.(Z+1).dev0 (
 git dev-release --dry-run patch
 ```
 
-- **A dev version names the *next* release** plus a pre-release marker: `.devN` (PEP 440) for `pyproject.toml`, `-devN` (semver, which npm and electron-builder require) for `package.json`, and a plain `-dev` for `VERSION.txt`: `0.1.5 < 0.1.6.dev0 < 0.1.6`. Builds toward the same target tick the counter (`dev0`, `dev1`, …) so each published artifact is distinct (TestPyPI rejects duplicates).
+- **A dev version names the *next* release** plus a pre-release marker: `.devN` (PEP 440) for `pyproject.toml`, as in `0.1.5 < 0.1.6.dev0 < 0.1.6`, and `-devN` (semver, which npm and electron-builder require) for `package.json`. Builds toward the same target tick the counter (`dev0`, `dev1`, …) so each published artifact is distinct (TestPyPI rejects duplicates).
 - **`--open`** is run right after a release (part of the back-merge cascade) to set `develop`'s honest version to the next-patch placeholder.
 - `VERSION.txt` repos get a plain `-dev` marker and publish nothing — the dev *build* path is code-repo-only.
 
@@ -88,7 +88,7 @@ The full convention — when to open a cycle, how it interacts with `version-gua
 
 ## `build-pages-site` — build a repo's documentation site
 
-`build-pages-site` assembles the GitHub Pages site of a repo that publishes its `docs/` (the handbook's [`docs-site.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/docs-site.md)). It is the implementation that the handbook's `pages-docs.yml` template runs, so the mechanics live here and only the page shell (the styling and the introduction) stays per-repo; pensa-grex, whose builder it generalises, still runs its own `scripts/build_pages_site.py`.
+`build-pages-site` assembles the GitHub Pages site of a repo that publishes its `docs/` (the handbook's [`docs-site.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/docs-site.md)). It is the implementation that the handbook's `pages-docs.yml` template runs: the mechanics live here, and only the page shell (the styling and the introduction) stays per-repo. The one exception is pensa-grex, whose builder it generalises and which still runs its own `scripts/build_pages_site.py`.
 
 It reads `docs/` and `site/` at the repo root and nothing else, and writes into `--out`:
 
@@ -127,7 +127,7 @@ The root index and every folder index are one HTML file, the shell, with these p
 
 A placeholder that starts its line is indented to that line's column, every line of a multi-line value with it, so the output follows the shell's own layout. A placeholder is written exactly as listed; any other `{{name}}`, a different case or spacing included, fails the build. A shell, and `site/intro.html`, may also carry `__LATEST_TAG__`, which the build substitutes as it does in a hand-built page. The generated list is a `<div class="group <key>">` per group (`northstar`, `html`, `specs`, `ideas`, `contributing`, `folders`), each holding an `<h3>` and a `<ul class="doclist">` of `<li class="doc">` cards with a `.doc-title` link and, when there is one, a `.doc-desc` paragraph and a `.doc-meta` line; a shell styles those classes. A shell kept under `site/` (say `site/shell.html`) is not published.
 
-The built-in shell is the `DEFAULT_SHELL` string in the script, the starting point for a custom one: the handbook's brand palette and the component vocabulary of its `templates/md-to-html/default.html` (a header bar with the logo mark, a hero, a section label, cards, a footer) on the system font stacks, with no font file, no script and no network request, collapsing to one column below 680 px. pensa-grex's page, the reference this command was generalised from, is that site's Googie-themed page (its bundled fonts, its palette with the light/dark toggle, its hero with the Downloads card and the icons, its own footer), too particular to that site to serve here as an example. The table above is the whole interface.
+The built-in shell is the `DEFAULT_SHELL` string in the script, the starting point for a custom one: the handbook's brand palette and the component vocabulary of its `templates/md-to-html/default.html` (a header bar with the logo mark, a hero, a section label, cards, a footer) on the system font stacks, with no font file, no script and no network request, collapsing to one column below 680 px. pensa-grex's page, the reference this command was generalised from, is Googie-themed (its bundled fonts, its palette with the light/dark toggle, its hero with the Downloads card and the icons, its own footer), too particular to that site to serve here as an example. The table above is the whole interface.
 
 ### What it guarantees
 
@@ -159,7 +159,7 @@ Locally, `install.sh` links `build-pages-site` into `~/.local/bin` like the othe
 
 ## `generate-changelog` — a release's changelog section
 
-`generate-changelog` writes the changelog section of one release: a Highlights paragraph written by a model, and the list of what the release holds, built from the repository's history at the tag and its merged pull requests. A release workflow runs it from a checkout of dev-tools pinned to a release, so every repository's notes follow the rule of the dev-tools release it pins, and the rule changes only with a dev-tools release.
+`generate-changelog` writes the changelog section of one release: a Highlights paragraph written by a model, and the list of what the release holds, built from the repository's history at the tag and its merged pull requests. A release workflow that runs it does so from a checkout of dev-tools pinned to a release, so that repository's notes follow the rule of the dev-tools release its workflow pins, and the rule changes only with a dev-tools release.
 
 ```bash
 generate-changelog [--mode generate|insert|both] [--tag vX.Y.Z] [--repo DIR] [--reuse-committed]
@@ -211,9 +211,9 @@ The pin is the release's full commit SHA (`git rev-parse vX.Y.Z^{commit}`) with 
 
 `tests/test_generate_changelog.py` builds each case of the rule in a temporary repository, making the commits GitHub would make under GitHub's committer identity; it supplies the pull requests as recorded JSON and stubs the model, so it runs offline in the test workflow. These constructed-history unit tests are the release gate for the rule: a dev-tools release that changes the script is made once they pass in CI and the `profiles` mode of `tests/acceptance/acceptance.py` passes over the real-history check's representatives (below).
 
-`tests/acceptance/` also holds the `full` mode, which runs the script against the ten repositories the rule was measured on, comparing every release's list with the recorded result or, for a release made after the measurement, with the expected set computed from GitHub's record. Its run of 2026-09-18 is the dated record of how the rule was validated (its result is in [`tests/acceptance/README.md`](tests/acceptance/README.md)); the mode is not a precondition of a release; it is run by hand, from the commit being released, when there is reason to (for instance, before a change wide enough that the representatives alone do not give confidence). The practice that replaces it: when a real release anywhere produces a wrong list, the shape of history that caused it becomes a new constructed unit test in `tests/test_generate_changelog.py`, so the release gate keeps growing to cover what the corpus once stood in for.
+`tests/acceptance/` also holds the `full` mode, which runs the script against the ten repositories the rule was measured on, comparing every release's list with the recorded result, with the list a ruling now gives where one changed it (cogrind-workshop v0.1.0), or, for a release made after the measurement, with the expected set computed from GitHub's record. Its run of 2026-09-18 is the dated record of how the rule was validated (its result is in [`tests/acceptance/README.md`](tests/acceptance/README.md)); the mode is not a precondition of a release; it is run by hand, from the commit being released, when there is reason to (for instance, before a change wide enough that the representatives alone do not give confidence). The practice that replaces it as a precondition: when a real release anywhere produces a wrong list, the shape of history that caused it becomes a new constructed unit test in `tests/test_generate_changelog.py`, so the release gate keeps growing to cover what the corpus once stood in for.
 
-The real-history check (`tests/acceptance/acceptance.py profiles`) runs the script's dry run on the latest release of one representative repository per publishing profile (`tests/acceptance/representatives.json`), and compares its list with the tag's published Release once that Release was made by the shared generator, else with the recorded or expected result — the same comparison `full` makes, but over one repository per profile instead of a ten-repository census. [`tests/acceptance/README.md`](tests/acceptance/README.md) defines a ruled change, records the rulings, describes the representatives and says how to run every mode.
+The real-history check (`tests/acceptance/acceptance.py profiles`) runs the script's dry run on the latest release of one representative repository per publishing profile (`tests/acceptance/representatives.json`), and compares its list with the tag's published Release once that Release was made by the shared generator, else with the recorded, ruled or expected result — the same comparison `full` makes, but over one repository per profile instead of a ten-repository census. [`tests/acceptance/README.md`](tests/acceptance/README.md) defines a ruled change, records the rulings, describes the representatives and says how to run every mode.
 
 ## Release flow (in brief)
 
@@ -227,7 +227,7 @@ git push --follow-tags        # CI publishes
 # then back-merge main -> develop
 ```
 
-dev-tools is itself a `VERSION.txt` repo and is **released with these very tools** — `VERSION.txt` is the source of truth, bumped by `git bump` and tagged by `git release`. It ships no package, so a release promotes `develop → main` and tags, and the tag's push runs `.github/workflows/release.yml`, the handbook's `release-txt.yml` template: the three-check gate (the tag equals `VERSION.txt`, the tagged commit is on `main`, the version is greater than the previous tag's), then a GitHub Release with GitHub's generated notes. The gate runs once the tag exists, so it reports a bad tag but cannot prevent it. A ruleset on dev-tools refuses the move or deletion of any `v*` tag and names no bypass actor, so the gate's advice to re-tag from `main` cannot be followed here: a tag whose release run fails stays, no pin moves to it, and the next patch release supersedes it.
+dev-tools is itself a `VERSION.txt` repo and is **released with these very tools** — `VERSION.txt` is the source of truth, bumped by `git bump` and tagged by `git release`. It ships no package, so a release promotes `develop → main` and tags, and the tag's push runs `.github/workflows/release.yml`, the handbook's release workflow for a `VERSION.txt` repository: the three-check gate (the tag equals `VERSION.txt`, the tagged commit is on `main`, the version is greater than the previous tag's), then a GitHub Release with GitHub's generated notes. The gate runs once the tag exists, so it reports a bad tag but cannot prevent it. A ruleset on dev-tools refuses the move or deletion of any `v*` tag and names no bypass actor, so the gate's advice to re-tag from `main` cannot be followed here: a tag whose release run fails stays, no pin moves to it, and the next patch release supersedes it.
 
 ## Adding a tool
 
