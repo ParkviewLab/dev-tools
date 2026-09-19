@@ -26,18 +26,17 @@ The clone given to `tag` or `release-check` must be a disposable full clone: the
 
 ## The representatives
 
-`representatives.json` holds the real-history check's set: one repository per publishing profile, chosen by the 2026-09-18 ruling "The real-history check, refining the NR01 ruling" (proposal "One changelog generator") because each profile runs the changelog job inside a different shape of release workflow, so one repository per profile suffices — a set defined by profile, not a census.
+`representatives.json` holds the real-history check's set: one repository per publishing profile, chosen by the 2026-09-18 ruling "The real-history check, refining the NR01 ruling" (proposal "One changelog generator"). A profile is its version file and its publish targets, since the changelog script reads the version file (and its lock file) to recognise version-bump commits and the project's name, and each set of publish targets gives the release workflow a different shape, so one repository per profile suffices — a set defined by profile, not a census.
 
 | Profile | Representative | Reason |
 |---|---|---|
-| Python, GHCR only | paper-boxing | the profile's representative under the ruling |
-| Python, PyPI only | cogrind-workshop | the profile's representative under the ruling |
-| Python, PyPI and GHCR | smalt-mcp | the largest history and the longest log among the profile's repositories |
-| Node, npm and GHCR | jonobones | the profile's representative under the ruling |
-| Electron | pensa-grex | the longer release history among the profile's repositories |
-| Node, npm only | *(none yet)* | no repository of this profile yet |
-| Node, GHCR only | *(none yet)* | no repository of this profile yet |
-| Rust | *(none yet)* | no repository of this profile yet |
+| pyproject.toml, GHCR | paper-boxing | the profile's representative under the ruling |
+| pyproject.toml, PyPI | cogrind-workshop | the profile's representative under the ruling |
+| pyproject.toml, PyPI and GHCR | smalt-mcp | the largest history and the longest log among the profile's repositories |
+| package.json, npm and GHCR | jonobones | the profile's representative under the ruling |
+| package.json, installers | pensa-grex | the longer release history among the profile's repositories |
+| Cargo.toml, installers | *(none yet)* | no repository of this profile has releases yet; pensa-forma joins when it has releases |
+| npm only | *(none yet)* | no repository of this profile yet |
 
 `acceptance.py profiles` reads the file's active members (a profile with a repository) and skips a pending one; `representatives()` in `acceptance.py` is the read.
 
@@ -46,6 +45,8 @@ Three rules keep the set current, and each is a change to `representatives.json`
 - A pending profile (no repository yet) joins the set, carrying its first repository, once one is created.
 - An archived representative is replaced by the next repository of its profile.
 - A profile with no repository left leaves the set; the reason is recorded in `representatives.json` and here.
+
+`package.json, GHCR` left the set on 2026-09-18: its two dimensions are covered by paper-boxing and jonobones (relabelled by version file and publish target, 2026-09-18). `representatives.json` has no field for a departed profile, so the reason is recorded here only.
 
 ## What it compares
 
