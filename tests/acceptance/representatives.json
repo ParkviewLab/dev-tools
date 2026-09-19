@@ -3,49 +3,43 @@
   "source": "the 2026-09-18 ruling \"The real-history check, refining the NR01 ruling\" (proposal \"One changelog generator\")",
   "profiles": [
     {
-      "profile": "Python, GHCR only",
+      "profile": "pyproject.toml, GHCR",
       "repo": "paper-boxing",
       "status": "active",
       "reason": "the profile's representative under the ruling"
     },
     {
-      "profile": "Python, PyPI only",
+      "profile": "pyproject.toml, PyPI",
       "repo": "cogrind-workshop",
       "status": "active",
       "reason": "the profile's representative under the ruling"
     },
     {
-      "profile": "Python, PyPI and GHCR",
+      "profile": "pyproject.toml, PyPI and GHCR",
       "repo": "smalt-mcp",
       "status": "active",
       "reason": "the largest history and the longest log among the profile's repositories, per the ruling"
     },
     {
-      "profile": "Node, npm and GHCR",
+      "profile": "package.json, npm and GHCR",
       "repo": "jonobones",
       "status": "active",
       "reason": "the profile's representative under the ruling"
     },
     {
-      "profile": "Electron",
+      "profile": "package.json, installers",
       "repo": "pensa-grex",
       "status": "active",
       "reason": "the longer release history among the profile's repositories, per the ruling"
     },
     {
-      "profile": "Node, npm only",
+      "profile": "Cargo.toml, installers",
       "repo": null,
       "status": "pending",
-      "reason": "no repository of this profile yet; it joins the set when its first repository does"
+      "reason": "no repository of this profile has releases yet; pensa-forma joins when it has releases"
     },
     {
-      "profile": "Node, GHCR only",
-      "repo": null,
-      "status": "pending",
-      "reason": "no repository of this profile yet; it joins the set when its first repository does"
-    },
-    {
-      "profile": "Rust",
+      "profile": "npm only",
       "repo": null,
       "status": "pending",
       "reason": "no repository of this profile yet; it joins the set when its first repository does"

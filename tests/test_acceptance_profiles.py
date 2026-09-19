@@ -90,18 +90,18 @@ class RepresentativesTests(unittest.TestCase):
         self.assertEqual(
             by_profile,
             {
-                "Python, GHCR only": "paper-boxing",
-                "Python, PyPI only": "cogrind-workshop",
-                "Python, PyPI and GHCR": "smalt-mcp",
-                "Node, npm and GHCR": "jonobones",
-                "Electron": "pensa-grex",
+                "pyproject.toml, GHCR": "paper-boxing",
+                "pyproject.toml, PyPI": "cogrind-workshop",
+                "pyproject.toml, PyPI and GHCR": "smalt-mcp",
+                "package.json, npm and GHCR": "jonobones",
+                "package.json, installers": "pensa-grex",
             },
         )
 
     def test_pending_profiles_carry_no_repository(self):
         data = json.loads(REPRESENTATIVES.read_text(encoding="utf-8"))
         pending = [p for p in data["profiles"] if p["status"] == "pending"]
-        self.assertEqual({p["profile"] for p in pending}, {"Node, npm only", "Node, GHCR only", "Rust"})
+        self.assertEqual({p["profile"] for p in pending}, {"npm only", "Cargo.toml, installers"})
         self.assertTrue(all(p["repo"] is None for p in pending))
 
 
