@@ -1,0 +1,48 @@
+{
+  "generated": "2026-09-18",
+  "source": "the 2026-09-18 ruling \"The real-history check, refining the NR01 ruling\" (proposal \"One changelog generator\"), relabelled by version file and publish target by T7 of the handbook plan \"release and dev-release jobs chosen by publish target\" (2026-09-18)",
+  "profiles": [
+    {
+      "profile": "pyproject.toml, GHCR",
+      "repo": "paper-boxing",
+      "status": "active",
+      "reason": "the profile's representative under the ruling"
+    },
+    {
+      "profile": "pyproject.toml, PyPI",
+      "repo": "cogrind-workshop",
+      "status": "active",
+      "reason": "the profile's representative under the ruling"
+    },
+    {
+      "profile": "pyproject.toml, PyPI and GHCR",
+      "repo": "smalt-mcp",
+      "status": "active",
+      "reason": "the largest history and the longest log among the profile's repositories, per the ruling"
+    },
+    {
+      "profile": "package.json, npm and GHCR",
+      "repo": "jonobones",
+      "status": "active",
+      "reason": "the profile's representative under the ruling"
+    },
+    {
+      "profile": "package.json, installers",
+      "repo": "pensa-grex",
+      "status": "active",
+      "reason": "the longer release history among the profile's repositories, per the ruling"
+    },
+    {
+      "profile": "Cargo.toml, installers",
+      "repo": null,
+      "status": "pending",
+      "reason": "no repository of this profile has releases yet; pensa-forma joins when it has releases"
+    },
+    {
+      "profile": "npm only",
+      "repo": null,
+      "status": "pending",
+      "reason": "no repository of this profile yet; it joins the set once its first repository has a vX.Y.Z release"
+    }
+  ]
+}
