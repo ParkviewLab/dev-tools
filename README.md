@@ -227,7 +227,7 @@ git push --follow-tags        # CI publishes
 # then back-merge main -> develop
 ```
 
-dev-tools is itself a `VERSION.txt` repo and is **released with these very tools** — `VERSION.txt` is the source of truth, bumped by `git bump` and tagged by `git release`. It ships no package, so a release promotes `develop → main` and tags, and the tag's push runs `.github/workflows/release.yml`, the handbook's `release-txt.yml` template: the three-check gate (the tag equals `VERSION.txt`, the tagged commit is on `main`, the version is greater than the previous tag's), then a GitHub Release with GitHub's generated notes. The gate runs once the tag exists, so it reports a bad tag but cannot prevent it.
+dev-tools is itself a `VERSION.txt` repo and is **released with these very tools** — `VERSION.txt` is the source of truth, bumped by `git bump` and tagged by `git release`. It ships no package, so a release promotes `develop → main` and tags, and the tag's push runs `.github/workflows/release.yml`, the handbook's `release-txt.yml` template: the three-check gate (the tag equals `VERSION.txt`, the tagged commit is on `main`, the version is greater than the previous tag's), then a GitHub Release with GitHub's generated notes. The gate runs once the tag exists, so it reports a bad tag but cannot prevent it. A ruleset on dev-tools refuses the move or deletion of any `v*` tag and names no bypass actor, so the gate's advice to re-tag from `main` cannot be followed here: a tag whose release run fails stays, no pin moves to it, and the next patch release supersedes it.
 
 ## Adding a tool
 
