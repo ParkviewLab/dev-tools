@@ -46,7 +46,7 @@ Three rules keep the set current, and each is a change to `representatives.json`
 - An archived representative is replaced by the next repository of its profile.
 - A profile with no repository left leaves the set; the reason is recorded in `representatives.json` and here.
 
-`package.json, GHCR` left the set on 2026-09-18: its two dimensions are covered by paper-boxing and jonobones (relabelled by version file and publish target, 2026-09-18). `representatives.json` has no field for a departed profile, so the reason is recorded here only.
+The profile "Node, GHCR only" left the set on 2026-09-18, when the profiles were relabelled by version file and publish target: paper-boxing covers a GHCR-only release and jonobones covers `package.json`. `representatives.json` has no field for a departed profile, so the reason is recorded here only.
 
 ## What it compares
 
