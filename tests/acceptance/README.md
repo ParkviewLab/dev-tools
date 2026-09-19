@@ -1,8 +1,8 @@
 # The acceptance run of `generate-changelog`
 
-`acceptance.py` runs `scripts/generate-changelog` against real repositories and compares each list it gives with either a recorded or a computed truth. It needs the network and `gh` logged in to GitHub, so it is not a unit test and CI does not run it; nothing here is named `test*.py` and the folder has no `__init__.py`, so `unittest` discovery never enters it (`tests/test_acceptance_profiles.py`, at the top level of `tests/`, unit-tests the one piece of its comparison logic that needs no network). It never calls the model: the script runs without `ANTHROPIC_API_KEY`, every Highlights paragraph is the placeholder, and what is compared is the list.
+`acceptance.py` runs `scripts/generate-changelog` against real repositories and compares each list it gives with either a recorded or a computed truth. It needs the network and `gh` logged in to GitHub, so it is not a unit test and CI does not run it; nothing here is named `test*.py` and the folder has no `__init__.py`, so `unittest` discovery never enters it (`tests/test_acceptance_profiles.py`, at the top level of `tests/`, unit-tests `published_comparison` and the read of `representatives.json`, which need no network). It never calls the model: the script runs without `ANTHROPIC_API_KEY`, every Highlights paragraph is the placeholder, and what is compared is the list.
 
-It has two roles, run by different modes. `profiles` is the release gate's real-history check: it runs the script over one representative repository per publishing profile (below) and, alongside the constructed-history unit tests, is required before a dev-tools release that changes the script — see the [dev-tools README](../../README.md#tests). `full` is the run made in September 2026 over the ten repositories on which the rule was measured (the measurement's report is `evidence/measure.md`); it stays here as the dated record of that validation, not as a precondition of any release, and is run by hand. `tag` and `release-check` are dry-run and audit tools for one tag at a time, used by both roles and standalone.
+It has two roles, run by different modes. `profiles` is the release gate's real-history check: it runs the script over one representative repository per publishing profile (below) and, alongside the constructed-history unit tests, is required before a dev-tools release that changes the script — see the [dev-tools README](../../README.md#tests). `full` runs the script over the ten repositories on which the rule was measured (the measurement's report is `evidence/measure.md`). Its run of 2026-09-18, at the final commit of [#8](https://github.com/ParkviewLab/dev-tools/pull/8) (9406586), passed: the 80 recorded releases reproduced their recorded lists exactly, cogrind-workshop v0.1.0 gave the list ruling 9a gives, and paper-boxing v0.2.0 to v0.4.0 listed exactly the expected set. That run is the dated record of the validation; the mode is not a precondition of any release, and is run by hand. `tag` and `release-check` are dry-run and audit tools for one tag at a time, used by both roles and standalone.
 
 A ruled change is a difference from the recording that a ruling on the rule made. The ruling must be recorded, with its date, content and reason, under "Decided" below, and entered in `RULED` in `acceptance.py` with the list the rule now gives and one line naming the ruling. Any other difference fails the run: it is a defect to fix, or a change of the rule that needs a ruling before the release. The dev-tools README also states the practice that replaces the full run as a precondition: when a real release anywhere produces a wrong list, the shape of history that caused it becomes a new constructed test in `tests/test_generate_changelog.py`.
 
@@ -42,15 +42,15 @@ The clone given to `tag` or `release-check` must be a disposable full clone: the
 
 Three rules keep the set current, and each is a change to `representatives.json` in its own pull request, reviewed like any other:
 
-- A pending profile (no repository yet) joins the set, carrying its first repository, once one is created.
+- A pending profile (no representative yet) joins the set, carrying its first repository, once that repository has a `vX.Y.Z` release.
 - An archived representative is replaced by the next repository of its profile.
-- A profile with no repository left leaves the set; the reason is recorded in `representatives.json` and here.
+- A profile with no repository left leaves the set; the reason is recorded here.
 
 The profile "Node, GHCR only" left the set on 2026-09-18, when the profiles were relabelled by version file and publish target: paper-boxing covers a GHCR-only release and jonobones covers `package.json`. `representatives.json` has no field for a departed profile, so the reason is recorded here only.
 
 ## What it compares
 
-`full` always compares against the four bases below; `profiles` compares a representative's latest tag against its published Release once one was made by the shared generator, else against whichever of the first three bases applies to that tag.
+`full` compares each tag against one of the last three bases below (the recording, a ruled difference, or the expected set); `profiles` compares a representative's latest tag against its published Release once the shared generator made it (the first basis), else against the same three as `full`.
 
 - A representative's tag whose Release was made by the shared generator: the dry run's list must equal that Release's published list, character for character (`published_comparison` in `acceptance.py`, unit-tested offline in `tests/test_acceptance_profiles.py`).
 - A tag the measurement recorded: the list must equal the recorded list, the `section` of that tag in `evidence/evidence2.json` (`part2.per_release`), character for character.
