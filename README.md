@@ -215,6 +215,35 @@ The pin is the release's full commit SHA (`git rev-parse vX.Y.Z^{commit}`) with 
 
 The real-history check (`tests/acceptance/acceptance.py profiles`) runs the script's dry run on the latest release of one representative repository per publishing profile (`tests/acceptance/representatives.json`), and compares its list with the tag's published Release once that Release was made by the shared generator, else with the recorded, ruled or expected result — the same comparison `full` makes, but over one repository per profile instead of a ten-repository census. [`tests/acceptance/README.md`](tests/acceptance/README.md) defines a ruled change, records the rulings, describes the representatives and says how to run every mode.
 
+## `assemble-workflows` — a repo's release workflows from the handbook's parts
+
+Writes a repository's `.github/workflows/release.yml`, and `dev-release.yml` where it has dev builds, from the handbook's parts, by the recipe in the handbook's [`ci.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/ci.md). It is the tool form of that recipe: the head, the gate, the job of each publish target in the order `docker`, `pypi`, `npm`, `installers`, then the job that creates the GitHub Release, with `TARGET_JOBS` replaced by the repo's target jobs and the installers download step kept only with the installers target.
+
+```sh
+assemble-workflows --handbook ~/dev/github/ParkviewLab/handbook/handbook-main          # write them
+assemble-workflows --handbook ~/dev/github/ParkviewLab/handbook/handbook-main --check  # compare only
+```
+
+`--check` writes nothing and reports each difference from the assembly, naming the job it falls in. It exits 0 when every workflow matches or every difference is a declared slot, 1 when a difference is undeclared, and 2 on a usage or declaration error, so CI and the convention auditor can run it.
+
+What a repo publishes, and where it differs from the parts on purpose, is declared in `.github/workflows/.assembly.toml`:
+
+```toml
+targets = ["docker", "pypi"]   # the release targets, in any order
+dev = true                     # whether the repo has dev builds
+header = "…"                   # the SPDX header, placed above the head part
+
+[[slots]]                      # each documented difference from a part
+job = "docker"
+reason = "three images from one Dockerfile, one matrix leg each"
+```
+
+A repo with no such file has its targets read from the jobs its `release.yml` already carries and its header from that file's leading comment, and declares no slot, so the check runs anywhere without preparing the repo first.
+
+### Tests
+
+`tests/test_assemble_workflows.py` builds a small handbook of parts and a repo in a temporary directory for each case: each combination of targets in use, the installers download step kept and dropped, the documents target's own final job, the header, an inferred declaration, a declared slot passing the check and an undeclared difference failing it, and each declaration error. Standard-library `unittest`, no network.
+
 ## Release flow (in brief)
 
 Releases are tag-driven and cut from `main`; CI gates publish on the tag being reachable from `origin/main`. The full flow + rationale (why bump+tag on `main`, the back-merge cascade, the CI gate) lives in the **[handbook's `releases.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md)**. The one-liner:

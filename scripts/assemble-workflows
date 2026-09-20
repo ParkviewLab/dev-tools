@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Assemble a repository's release workflows from the handbook's parts.
+
+Usage:
+    assemble-workflows --handbook DIR [--repo DIR] [--check]
+
+Writes `.github/workflows/release.yml`, and `dev-release.yml` where the
+repository has dev builds, from the parts in the handbook's
+`templates/.github/workflows/release/` and `dev-release/`, by the recipe in
+the handbook's `ci.md`: the head, the gate, the job of each publish target in
+the order docker, pypi, npm, installers, and then the job that creates the
+GitHub Release. `TARGET_JOBS` in that job's `needs:` becomes the repository's
+target jobs, and the installers download step is kept only with the installers
+target. For the documents target the release job is the target's own part.
+
+What the repository publishes, and where it differs from the parts, is declared
+in `.github/workflows/.assembly.toml`. A repository without that file has its
+targets read from the jobs its `release.yml` already carries, and declares no
+slot, so the check can be run anywhere without preparing the repository first:
+
+    targets = ["docker", "pypi"]   # the release targets, in any order
+    dev = true                     # whether the repository has dev builds
+    header = '''                   # the SPDX header the repository's REUSE
+    # SPDX-FileCopyrightText: …    # layout asks for, placed above the head part
+    '''
+    [[slots]]                      # each documented difference from a part
+    job = "docker"
+    reason = "three images, one matrix"
+
+With `--check` nothing is written: the script compares each workflow with the
+assembly and reports every difference, naming the job it falls in. A job with a
+declared slot is reported as declared rather than as drift, so that CI and the
+convention auditor can run the check and see only what is undeclared.
+
+Exit status: 0 when the workflows match the assembly (or were written), 1 when
+`--check` finds an undeclared difference, 2 on a usage or declaration error.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+RELEASE_ORDER = ["docker", "pypi", "npm", "installers"]
+DEV_PARTS = {"docker": "docker", "pypi": "testpypi", "installers": "installers"}
+FINAL_JOB = {"documents": "documents", "default": "changelog"}
+JOB_RE = re.compile(r"^  ([a-z][a-z0-9_-]*):$", re.M)
+
+
+class Error(Exception):
+    """A usage or declaration error, reported without a traceback."""
+
+
+def infer_declaration(repo: Path) -> dict:
+    """What the repository publishes, read from the workflow it already has."""
+    release = repo / ".github/workflows/release.yml"
+    if not release.exists():
+        raise Error(f"{release} is missing, and there is no .assembly.toml to declare the targets")
+    jobs = JOB_RE.findall(release.read_text(), max(release.read_text().find("\njobs:\n"), 0))
+    targets = [job for job in jobs if job in RELEASE_ORDER]
+    if "release" in jobs and not targets:
+        targets = ["documents"]
+    if not targets:
+        raise Error(f"{release} names no target job; declare the targets in .assembly.toml")
+    text = release.read_text()
+    header = text[: text.index("name:")] if "name:" in text and not text.startswith("name:") else ""
+    return {
+        "targets": targets,
+        "dev": (repo / ".github/workflows/dev-release.yml").exists(),
+        "header": header,
+        "inferred": True,
+    }
+
+
+def read_declaration(repo: Path) -> dict:
+    """The repository's declaration, or what its workflows imply where it has none."""
+    path = repo / ".github/workflows/.assembly.toml"
+    if not path.exists():
+        return infer_declaration(repo)
+    data = tomllib.loads(path.read_text())
+    targets = data.get("targets")
+    if not targets or not isinstance(targets, list):
+        raise Error(f"{path}: `targets` must be a non-empty list")
+    known = set(RELEASE_ORDER) | {"documents"}
+    unknown = [t for t in targets if t not in known]
+    if unknown:
+        raise Error(f"{path}: unknown target(s) {', '.join(unknown)}; known targets are {', '.join(sorted(known))}")
+    if "documents" in targets and len(targets) > 1:
+        raise Error(f"{path}: the documents target stands alone")
+    return data
+
+
+def part(handbook: Path, kind: str, name: str) -> str:
+    path = handbook / "templates/.github/workflows" / kind / f"{name}.yml"
+    if not path.exists():
+        raise Error(f"{path} is missing: is --handbook a checkout of the handbook at a release?")
+    return path.read_text()
+
+
+def strip_installers_step(text: str) -> str:
+    """Drop the installers download step, which only a release with installers keeps."""
+    lines, out, dropping = text.splitlines(True), [], False
+    for line in lines:
+        if line.strip().startswith("# Installers target only:"):
+            dropping = True
+            continue
+        if dropping:
+            # the step itself, until the next step begins
+            if line.startswith("      - ") and "download-artifact" not in line and "Download all built installers" not in line:
+                dropping = False
+            else:
+                continue
+        out.append(line)
+    result = "".join(out)
+    if "download-artifact" in result:
+        raise Error("the installers download step could not be removed from the final job's part")
+    return result
+
+
+def assemble_release(handbook: Path, targets: list[str], header: str) -> str:
+    ordered = [t for t in RELEASE_ORDER if t in targets]
+    documents = targets == ["documents"]
+    text = part(handbook, "release", "head") + part(handbook, "release", "gate")
+    for target in ordered:
+        text += part(handbook, "release", target)
+    final = part(handbook, "release", FINAL_JOB["documents" if documents else "default"])
+    if not documents:
+        jobs = ", ".join(ordered)
+        final = final.replace("needs: [gate, TARGET_JOBS]", f"needs: [gate, {jobs}]")
+        if "TARGET_JOBS" in final:
+            raise Error("the final job's part no longer carries the TARGET_JOBS placeholder")
+        if "installers" not in ordered:
+            final = strip_installers_step(final)
+    text += final
+    return header + text if header else text
+
+
+def assemble_dev(handbook: Path, targets: list[str], header: str) -> str | None:
+    ordered = [t for t in RELEASE_ORDER if t in targets and t in DEV_PARTS]
+    if not ordered:
+        return None
+    text = part(handbook, "dev-release", "head") + part(handbook, "dev-release", "gate")
+    for target in ordered:
+        text += part(handbook, "dev-release", DEV_PARTS[target])
+    return header + text if header else text
+
+
+def job_of(text: str, line_no: int) -> str:
+    """The job a line falls in, or the file's head."""
+    start = text.find("\njobs:\n")
+    job = "the head"
+    for match in JOB_RE.finditer(text, start + 1 if start >= 0 else 0):
+        if text[: match.start()].count("\n") + 1 <= line_no:
+            job = match.group(1)
+        else:
+            break
+    return job
+
+
+def differences(current: str, wanted: str) -> list[tuple[str, str]]:
+    """Each hunk of the difference, as (job, text)."""
+    out: list[tuple[str, str]] = []
+    matcher = difflib.SequenceMatcher(None, current.splitlines(True), wanted.splitlines(True))
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        lines = "".join(f"- {line}" for line in current.splitlines(True)[i1:i2])
+        lines += "".join(f"+ {line}" for line in wanted.splitlines(True)[j1:j2])
+        out.append((job_of(current, i1 + 1), lines))
+    return out
+
+
+def check(path: Path, wanted: str, slots: set[str]) -> int:
+    name = path.name
+    if not path.exists():
+        print(f"{name}: missing; the assembly would create it")
+        return 1
+    current = path.read_text()
+    if current == wanted:
+        print(f"{name}: matches the assembly")
+        return 0
+    undeclared = 0
+    for job, hunk in differences(current, wanted):
+        if job in slots:
+            print(f"{name}: {job}: differs from its part, declared as a slot")
+            continue
+        undeclared += 1
+        print(f"{name}: {job}: differs from its part, not declared")
+        print("".join(f"    {line}" for line in hunk.splitlines(True)))
+    if not undeclared:
+        print(f"{name}: every difference is a declared slot")
+    return 1 if undeclared else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Assemble a repository's release workflows from the handbook's parts.")
+    parser.add_argument("--handbook", required=True, metavar="DIR", help="a checkout of the handbook at a release")
+    parser.add_argument("--repo", default=".", metavar="DIR", help="the repository (default: the current directory)")
+    parser.add_argument("--check", action="store_true", help="write nothing; report every difference")
+    args = parser.parse_args(argv)
+
+    try:
+        repo, handbook = Path(args.repo).resolve(), Path(args.handbook).resolve()
+        data = read_declaration(repo)
+        targets = list(data["targets"])
+        header = data.get("header", "")
+        slots = {slot.get("job", "") for slot in data.get("slots", [])}
+        release = assemble_release(handbook, targets, header)
+        dev = assemble_dev(handbook, targets, header) if data.get("dev") else None
+    except Error as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    workflows = repo / ".github/workflows"
+    status = 0
+    if data.get("inferred"):
+        print(f"no .assembly.toml: the targets are read from the workflow ({', '.join(targets)}), and no slot is declared")
+    if args.check:
+        status |= check(workflows / "release.yml", release, slots)
+        if dev is not None:
+            status |= check(workflows / "dev-release.yml", dev, slots)
+        elif (workflows / "dev-release.yml").exists():
+            print("dev-release.yml: present, though the declaration says the repository has no dev builds")
+            status = 1
+        return status
+
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / "release.yml").write_text(release)
+    print(f"wrote {workflows / 'release.yml'}")
+    if dev is not None:
+        (workflows / "dev-release.yml").write_text(dev)
+        print(f"wrote {workflows / 'dev-release.yml'}")
+    if slots:
+        print("declared slots are not re-applied by the assembly; restore them by hand: " + ", ".join(sorted(slots)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
