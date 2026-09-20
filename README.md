@@ -205,7 +205,7 @@ steps:
   #   uv run --script dev-tools/scripts/generate-changelog --mode=insert
 ```
 
-The pin is the release's full commit SHA (`git rev-parse vX.Y.Z^{commit}`) with the tag in a comment on the same line, because this job commits to `main` and creates the Release, and a SHA, unlike the tag the pages workflow above pins, names one commit by construction; the pin names a release whose own release run passed. A local run, such as a dry run or a repair, uses a dev-tools worktree at the pinned commit, not the clone that `install.sh` links: that clone runs the script of whatever branch it has checked out, as of its last `git pull` (`develop` after a fresh clone), and so may apply a different rule from the pinned release's; the linked command serves only to try the script.
+The pin is the release's full commit SHA (`git rev-parse vX.Y.Z^{commit}`) with the tag in a comment on the same line, and it names a release whose own release run passed. The policy is the handbook's, in [`ci.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/ci.md), "Shared dev scripts": a pin must be at or after its floor, the newest such release that changed the pinned script, and it moves during the repo's next piece of work, before its next release. The reasoning behind the shared script and its pin is recorded in the handbook's [`commits-and-changelogs-why.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/commits-and-changelogs-why.md). A local run, such as a dry run or a repair, uses a dev-tools worktree at the pinned commit, not the clone that `install.sh` links: that clone runs the script of whatever branch it has checked out, and so may apply a different rule from the pinned release's; the linked command serves only to try the script.
 
 ### Tests
 
