@@ -217,7 +217,7 @@ The real-history check (`tests/acceptance/acceptance.py profiles`) runs the scri
 
 ## `assemble-workflows` — a repo's release workflows from the handbook's parts
 
-Writes a repository's `.github/workflows/release.yml`, and `dev-release.yml` where it has dev builds, from the handbook's parts, by the recipe in the handbook's [`ci.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/ci.md). It is the tool form of that recipe: the head, the gate, the job of each publish target in the order `docker`, `pypi`, `npm`, `installers`, then the job that creates the GitHub Release, with `TARGET_JOBS` replaced by the repo's target jobs and the installers download step kept only with the installers target.
+Writes a repository's `.github/workflows/release.yml`, and `dev-release.yml` where it has dev builds, from the handbook's parts, by the recipe in the handbook's [`ci.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/ci.md). Needs Python 3.11 or later, for `tomllib`. It is the tool form of that recipe: the head, the gate, the job of each publish target in the order `docker`, `pypi`, `npm`, `installers`, then the job that creates the GitHub Release, with `TARGET_JOBS` replaced by the repo's target jobs and the installers download step kept only with the installers target.
 
 ```sh
 assemble-workflows --handbook ~/dev/github/ParkviewLab/handbook/handbook-main          # write them
@@ -230,19 +230,22 @@ What a repo publishes, and where it differs from the parts on purpose, is declar
 
 ```toml
 targets = ["docker", "pypi"]   # the release targets, in any order
-dev = true                     # whether the repo has dev builds
+dev = true                     # dev builds; false when the key is absent
 header = "…"                   # the SPDX header, placed above the head part
 
 [[slots]]                      # each documented difference from a part
-job = "docker"
+job = "docker"                 # the job as `--check` prints it
 reason = "three images from one Dockerfile, one matrix leg each"
+workflow = "release"           # or "dev-release", or "both"; default "release"
 ```
+
+Dev parts exist for `docker`, `pypi` (as `testpypi`) and `installers`; `npm` has none, since dev builds are for local testing, so `dev = true` with no such target is a declaration error. The blank and comment lines that introduce a job count as part of it, so the comment documenting a slot falls in the job it documents; a difference in the lines above the first job is reported as `the head`, and a slot declares it as `job = "the head"`. Writing the workflows removes a `dev-release.yml` the declaration no longer calls for, so that a write is always followed by a passing check.
 
 A repo with no such file has its targets read from the jobs its `release.yml` already carries and its header from that file's leading comment, and declares no slot, so the check runs anywhere without preparing the repo first.
 
 ### Tests
 
-`tests/test_assemble_workflows.py` builds a small handbook of parts and a repo in a temporary directory for each case: each combination of targets in use, the installers download step kept and dropped, the documents target's own final job, the header, an inferred declaration, a declared slot passing the check and an undeclared difference failing it, and each declaration error. Standard-library `unittest`, no network.
+`tests/test_assemble_workflows.py` builds a small handbook of parts and a repo in a temporary directory for each case: the target combinations in use and all four together in the recipe's order, the installers download step kept and dropped, the documents target's own final job, the header on both workflows, a stale dev workflow removed, an inferred declaration, the job a difference is attributed to (a leading comment belongs to the job it introduces), a declared slot passing the check and an undeclared difference failing it, a slot's scope over the two workflows, and each declaration error. The parts the fixtures build are shaped like the handbook's own, leading blank line and comment block included, since the attribution depends on them. Standard-library `unittest`, no network.
 
 ## Release flow (in brief)
 

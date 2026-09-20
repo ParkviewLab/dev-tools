@@ -6,6 +6,8 @@
 Usage:
     assemble-workflows --handbook DIR [--repo DIR] [--check]
 
+Needs Python 3.11 or later, for `tomllib`.
+
 Writes `.github/workflows/release.yml`, and `dev-release.yml` where the
 repository has dev builds, from the parts in the handbook's
 `templates/.github/workflows/release/` and `dev-release/`, by the recipe in
@@ -14,6 +16,8 @@ the order docker, pypi, npm, installers, and then the job that creates the
 GitHub Release. `TARGET_JOBS` in that job's `needs:` becomes the repository's
 target jobs, and the installers download step is kept only with the installers
 target. For the documents target the release job is the target's own part.
+Dev parts exist for docker, pypi (as testpypi) and installers; npm has none,
+since dev builds are for local testing.
 
 What the repository publishes, and where it differs from the parts, is declared
 in `.github/workflows/.assembly.toml`. A repository without that file has its
@@ -21,21 +25,24 @@ targets read from the jobs its `release.yml` already carries, and declares no
 slot, so the check can be run anywhere without preparing the repository first:
 
     targets = ["docker", "pypi"]   # the release targets, in any order
-    dev = true                     # whether the repository has dev builds
-    header = '''                   # the SPDX header the repository's REUSE
-    # SPDX-FileCopyrightText: …    # layout asks for, placed above the head part
-    '''
+    dev = true                     # dev builds; false when absent
+    header = "# SPDX-FileCopyrightText: 2026 …\\n\\n"   # placed above the head
     [[slots]]                      # each documented difference from a part
-    job = "docker"
-    reason = "three images, one matrix"
+    job = "docker"                 # as the check prints it; "the head" for the
+    reason = "three images"        #   lines above the first job
+    workflow = "release"           # or "dev-release", or "both"; default
+                                   #   "release"
 
 With `--check` nothing is written: the script compares each workflow with the
-assembly and reports every difference, naming the job it falls in. A job with a
-declared slot is reported as declared rather than as drift, so that CI and the
-convention auditor can run the check and see only what is undeclared.
+assembly and reports every difference, naming the job it falls in. The blank
+and comment lines that introduce a job count as part of it, so the comment
+documenting a slot falls in the job it documents. A job with a declared slot
+is reported as declared rather than as drift, so that CI and the convention
+auditor can run the check and see only what is undeclared.
 
 Exit status: 0 when the workflows match the assembly (or were written), 1 when
-`--check` finds an undeclared difference, 2 on a usage or declaration error.
+`--check` finds an undeclared difference or a workflow the assembly would not
+produce, 2 on a usage or declaration error.
 """
 
 from __future__ import annotations
@@ -51,6 +58,8 @@ RELEASE_ORDER = ["docker", "pypi", "npm", "installers"]
 DEV_PARTS = {"docker": "docker", "pypi": "testpypi", "installers": "installers"}
 FINAL_JOB = {"documents": "documents", "default": "changelog"}
 JOB_RE = re.compile(r"^  ([a-z][a-z0-9_-]*):$", re.M)
+HEAD = "the head"
+WORKFLOW_SCOPES = {"release", "dev-release", "both"}
 
 
 class Error(Exception):
@@ -62,13 +71,13 @@ def infer_declaration(repo: Path) -> dict:
     release = repo / ".github/workflows/release.yml"
     if not release.exists():
         raise Error(f"{release} is missing, and there is no .assembly.toml to declare the targets")
-    jobs = JOB_RE.findall(release.read_text(), max(release.read_text().find("\njobs:\n"), 0))
+    text = release.read_text()
+    jobs = [name for _, name in job_regions(text)]
     targets = [job for job in jobs if job in RELEASE_ORDER]
     if "release" in jobs and not targets:
         targets = ["documents"]
     if not targets:
         raise Error(f"{release} names no target job; declare the targets in .assembly.toml")
-    text = release.read_text()
     header = text[: text.index("name:")] if "name:" in text and not text.startswith("name:") else ""
     return {
         "targets": targets,
@@ -78,21 +87,50 @@ def infer_declaration(repo: Path) -> dict:
     }
 
 
+def read_slots(path: Path, data: dict) -> dict[str, set[str]]:
+    """The declared slots, as the set of job names each workflow excuses."""
+    declared = data.get("slots", [])
+    if not isinstance(declared, list) or any(not isinstance(slot, dict) for slot in declared):
+        raise Error(f"{path}: each slot is a `[[slots]]` table with `job` and `reason`")
+    slots: dict[str, set[str]] = {"release": set(), "dev-release": set()}
+    for slot in declared:
+        job = slot.get("job")
+        if not isinstance(job, str) or not job:
+            raise Error(f"{path}: each slot needs a `job`, as the check prints it (or \"{HEAD}\")")
+        scope = slot.get("workflow", "release")
+        if scope not in WORKFLOW_SCOPES:
+            raise Error(f"{path}: slot {job}: `workflow` is one of {', '.join(sorted(WORKFLOW_SCOPES))}")
+        for name in ("release", "dev-release") if scope == "both" else (scope,):
+            slots[name].add(job)
+    return slots
+
+
 def read_declaration(repo: Path) -> dict:
     """The repository's declaration, or what its workflows imply where it has none."""
     path = repo / ".github/workflows/.assembly.toml"
     if not path.exists():
         return infer_declaration(repo)
-    data = tomllib.loads(path.read_text())
+    try:
+        data = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError as error:
+        raise Error(f"{path}: {error}") from None
     targets = data.get("targets")
-    if not targets or not isinstance(targets, list):
-        raise Error(f"{path}: `targets` must be a non-empty list")
+    if not targets or not isinstance(targets, list) or any(not isinstance(t, str) for t in targets):
+        raise Error(f"{path}: `targets` must be a non-empty list of target names")
     known = set(RELEASE_ORDER) | {"documents"}
     unknown = [t for t in targets if t not in known]
     if unknown:
         raise Error(f"{path}: unknown target(s) {', '.join(unknown)}; known targets are {', '.join(sorted(known))}")
     if "documents" in targets and len(targets) > 1:
         raise Error(f"{path}: the documents target stands alone")
+    if not isinstance(data.get("dev", False), bool):
+        raise Error(f"{path}: `dev` must be true or false")
+    if not isinstance(data.get("header", ""), str):
+        raise Error(f"{path}: `header` must be a string")
+    if data.get("dev") and not [t for t in targets if t in DEV_PARTS]:
+        raise Error(f"{path}: `dev` is true, but none of {', '.join(targets)} has a dev part "
+                    f"(the dev parts are {', '.join(sorted(DEV_PARTS))})")
+    data["slots"] = read_slots(path, data)
     return data
 
 
@@ -111,12 +149,17 @@ def strip_installers_step(text: str) -> str:
             dropping = True
             continue
         if dropping:
-            # the step itself, until the next step begins
+            if line.strip() and not line.startswith("      "):
+                raise Error("the installers download step is not followed by another step of the same job; "
+                            "the final job's part has changed shape")
             if line.startswith("      - ") and "download-artifact" not in line and "Download all built installers" not in line:
                 dropping = False
             else:
                 continue
         out.append(line)
+    if dropping:
+        raise Error("the installers download step runs to the end of the final job's part; "
+                    "the part has changed shape")
     result = "".join(out)
     if "download-artifact" in result:
         raise Error("the installers download step could not be removed from the final job's part")
@@ -151,13 +194,30 @@ def assemble_dev(handbook: Path, targets: list[str], header: str) -> str | None:
     return header + text if header else text
 
 
+def job_regions(text: str) -> list[tuple[int, str]]:
+    """(first line, name) for each job, the blank and comment lines that introduce it included."""
+    start = text.find("\njobs:\n")
+    if start < 0:
+        return []
+    lines = text.splitlines()
+    floor = text[: start + 1].count("\n") + 2  # the line after `jobs:`
+    regions: list[tuple[int, str]] = []
+    for match in JOB_RE.finditer(text, start + 1):
+        key = text[: match.start()].count("\n") + 1
+        first = key
+        while first > floor and (not lines[first - 2].strip() or lines[first - 2].lstrip().startswith("#")):
+            first -= 1
+        regions.append((first, match.group(1)))
+        floor = key + 1
+    return regions
+
+
 def job_of(text: str, line_no: int) -> str:
     """The job a line falls in, or the file's head."""
-    start = text.find("\njobs:\n")
-    job = "the head"
-    for match in JOB_RE.finditer(text, start + 1 if start >= 0 else 0):
-        if text[: match.start()].count("\n") + 1 <= line_no:
-            job = match.group(1)
+    job = HEAD
+    for first, name in job_regions(text):
+        if first <= line_no:
+            job = name
         else:
             break
     return job
@@ -210,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         data = read_declaration(repo)
         targets = list(data["targets"])
         header = data.get("header", "")
-        slots = {slot.get("job", "") for slot in data.get("slots", [])}
+        slots = data.get("slots") or {"release": set(), "dev-release": set()}
         release = assemble_release(handbook, targets, header)
         dev = assemble_dev(handbook, targets, header) if data.get("dev") else None
     except Error as error:
@@ -218,15 +278,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     workflows = repo / ".github/workflows"
+    stale = workflows / "dev-release.yml"
     status = 0
     if data.get("inferred"):
         print(f"no .assembly.toml: the targets are read from the workflow ({', '.join(targets)}), and no slot is declared")
     if args.check:
-        status |= check(workflows / "release.yml", release, slots)
+        status |= check(workflows / "release.yml", release, slots["release"])
         if dev is not None:
-            status |= check(workflows / "dev-release.yml", dev, slots)
-        elif (workflows / "dev-release.yml").exists():
-            print("dev-release.yml: present, though the declaration says the repository has no dev builds")
+            status |= check(stale, dev, slots["dev-release"])
+        elif stale.exists():
+            print("dev-release.yml: present, though the declaration has no dev builds; the assembly would remove it")
             status = 1
         return status
 
@@ -234,10 +295,14 @@ def main(argv: list[str] | None = None) -> int:
     (workflows / "release.yml").write_text(release)
     print(f"wrote {workflows / 'release.yml'}")
     if dev is not None:
-        (workflows / "dev-release.yml").write_text(dev)
-        print(f"wrote {workflows / 'dev-release.yml'}")
-    if slots:
-        print("declared slots are not re-applied by the assembly; restore them by hand: " + ", ".join(sorted(slots)))
+        stale.write_text(dev)
+        print(f"wrote {stale}")
+    elif stale.exists():
+        stale.unlink()
+        print(f"removed {stale}: the declaration has no dev builds")
+    declared = sorted(slots["release"] | slots["dev-release"])
+    if declared:
+        print("declared slots are not re-applied by the assembly; restore them by hand: " + ", ".join(declared))
     return 0
 
 
