@@ -27,8 +27,9 @@ BASH = os.environ.get("BACKMERGE_TEST_BASH", "bash")
 
 # ---------------------------------------------------------------- version files
 
-def pyproject_text(name: str, version: str) -> str:
-    return (
+def pyproject_text(name: str, version: str, head: str = "") -> str:
+    # head: text before the [project] table, such as a [tool] table
+    return head + (
         "[project]\n"
         f'name = "{name}"\n'
         f'version = "{version}"\n'
@@ -118,17 +119,25 @@ def set_uv_lock_version(wt: Path, name: str, version: str) -> None:
     (wt / "uv.lock").write_text("".join(lines))
 
 
+def write_json(path: Path, data: dict, crlf: bool) -> None:
+    text = json.dumps(data, indent=2) + "\n"
+    path.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode())
+
+
 def set_package_version(wt: Path, version: str, lock: bool = True) -> None:
+    # as npm does, the line endings the file has are kept
     pj = wt / "package.json"
-    data = json.loads(pj.read_text())
+    raw = pj.read_bytes().decode()
+    data = json.loads(raw)
     data["version"] = version
-    pj.write_text(json.dumps(data, indent=2) + "\n")
+    write_json(pj, data, "\r\n" in raw)
     pl = wt / "package-lock.json"
     if lock and pl.exists():
-        data = json.loads(pl.read_text())
+        raw = pl.read_bytes().decode()
+        data = json.loads(raw)
         data["version"] = version
         data["packages"][""]["version"] = version
-        pl.write_text(json.dumps(data, indent=2) + "\n")
+        write_json(pl, data, "\r\n" in raw)
 
 
 # ---------------------------------------------------------------- the fakes
@@ -167,11 +176,15 @@ import json, os, sys
 a = sys.argv[1:]
 if a[:1] == ["version"]:
     v = [x for x in a[1:] if not x.startswith("-")][0]
-    d = json.load(open("package.json")); d["version"] = v
-    open("package.json", "w").write(json.dumps(d, indent=2) + "\n")
+    def write(name, d, raw):   # npm keeps the file's line endings
+        text = json.dumps(d, indent=2) + "\n"
+        open(name, "wb").write((text.replace("\n", "\r\n") if b"\r\n" in raw else text).encode())
+    raw = open("package.json", "rb").read(); d = json.loads(raw); d["version"] = v
+    write("package.json", d, raw)
     if os.path.exists("package-lock.json"):
-        d = json.load(open("package-lock.json")); d["version"] = v; d["packages"][""]["version"] = v
-        open("package-lock.json", "w").write(json.dumps(d, indent=2) + "\n")
+        raw = open("package-lock.json", "rb").read(); d = json.loads(raw)
+        d["version"] = v; d["packages"][""]["version"] = v
+        write("package-lock.json", d, raw)
     sys.exit(0)
 sys.stderr.write("fake npm: unsupported %r\n" % a); sys.exit(2)
 '''
@@ -541,7 +554,9 @@ class ReleasedRepo:
     feature A merged; develop promoted into main, bumped and tagged v2; where
     the release writes a changelog, the bot's changelog commit on main; and,
     if feature_during_release, feature F merged into develop after the promotion.
-    lock_bulk pads the lockfile with that many dependency entries after the
+    crlf writes package.json and package-lock.json with CRLF line endings, which
+    the setters keep, as npm does; pyproject_head is text placed before the
+    [project] table. lock_bulk pads the lockfile with that many dependency entries after the
     project's own, to the size of a real one. lock_twin adds a dependency named
     twin whose version is the release's, v2, throughout; lock_project_version=False
     leaves uv.lock without the project's version.
@@ -556,9 +571,9 @@ class ReleasedRepo:
     def __init__(self, sb: Sandbox, kind: str = "pyproject", feature_during_release: bool = True,
                  changelog: bool | None = None, lockfile: bool = True, lock_bulk: int = 0,
                  lock_twin: bool = False, lock_project_version: bool = True,
-                 project_name: str = "sim-app") -> None:
+                 project_name: str = "sim-app", crlf: bool = False, pyproject_head: str = "") -> None:
         self.sb, self.kind = sb, kind
-        self.project_name = project_name
+        self.project_name, self.crlf, self.pyproject_head = project_name, crlf, pyproject_head
         self.lock_bulk, self.lock_twin, self.lock_project_version = lock_bulk, lock_twin, lock_project_version
         self.v1, self.v2, self.placeholder, self.dev1 = self.VERSIONS[kind]
         self.tag1, self.tag2 = "v" + self.v1, "v" + self.v2
@@ -622,15 +637,16 @@ class ReleasedRepo:
 
     def write_version_files(self, wt: Path, version: str, lockfile: bool = True) -> None:
         if self.kind == "pyproject":
-            (wt / "pyproject.toml").write_text(pyproject_text(self.project_name, version))
+            (wt / "pyproject.toml").write_text(pyproject_text(self.project_name, version, self.pyproject_head))
             if lockfile:
                 (wt / "uv.lock").write_text(uv_lock_text(
                     normalised(self.project_name), version, self.lock_bulk, self.v2 if self.lock_twin else None, self.lock_project_version))
         elif self.kind == "package":
-            (wt / "package.json").write_text(package_json_text("sim-node", version))
+            crlf = (lambda t: t.replace("\n", "\r\n")) if self.crlf else (lambda t: t)
+            (wt / "package.json").write_bytes(crlf(package_json_text("sim-node", version)).encode())
             if lockfile:
-                (wt / "package-lock.json").write_text(package_lock_text(
-                    "sim-node", version, self.lock_bulk, self.v2 if self.lock_twin else None))
+                (wt / "package-lock.json").write_bytes(crlf(package_lock_text(
+                    "sim-node", version, self.lock_bulk, self.v2 if self.lock_twin else None)).encode())
         else:
             (wt / "VERSION.txt").write_text(version + "\n")
 

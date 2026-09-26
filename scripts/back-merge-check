@@ -23,7 +23,8 @@
 #   tag       the released tag the branch names (back-merge-<tag>), e.g. v1.2.3.
 #             Tag mode: every commit the merge brings from main must be in the
 #             tag or be that tag's changelog commit, `docs(changelog): <tag>
-#             [skip ci]`, touching CHANGELOG.md only; and main's version must be
+#             [skip ci]`, which modifies or adds CHANGELOG.md alone, as a plain
+#             file (submodule ignore settings do not apply); and main's version must be
 #             the tag's. The version guard's back-merge mode always passes it.
 #
 # `git back-merge` runs this on its own branch before it pushes, and, in a
@@ -45,8 +46,11 @@
 #      mode, and compared blob to blob), and only from main's version to the
 #      next-patch placeholder that dev-tools' _sot.sh computes for it
 #      (X.Y.(Z+1).dev0 for pyproject.toml, X.Y.(Z+1)-dev0 for package.json); a
-#      lockfile that records the project's version moves with it, and the line
-#      that changes belongs to the project itself, not to a dependency.
+#      lockfile that records the project's version moves with it, and each line
+#      that changes is the project's own: the [project] table's version, the
+#      top-level version of package.json, and in a lockfile the project's entry,
+#      not a dependency's. Neither file may hold a NUL byte, and a submodule's
+#      ignore setting hides no change.
 #   5. In tag mode, as above.
 #   6. A shallow repository is refused outright.
 #
@@ -56,6 +60,7 @@
 # handbook's releases.md and ci.md.
 
 set -euo pipefail
+export LC_ALL=C   # byte-wise awk comparisons: macOS awk compares strings with strcoll
 
 usage() { echo "usage: back-merge-check <base> <head> [<main-ref>] [<tag>]"; }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
@@ -186,8 +191,14 @@ if [ -n "$TAG" ]; then
   git merge-base --is-ancestor "$TAGC" "$P2" || fail "tag $TAG is not an ancestor of the merged main commit"
   for c in $(git rev-list "$P2" --not "$TAGC"); do
     s=$(git log -1 --format=%s "$c")
-    f=$(git diff-tree --no-commit-id --name-only -r "$c")
-    [ "$s" = "docs(changelog): $TAG [skip ci]" ] && [ "$f" = "CHANGELOG.md" ] \
+    # the raw diff: one entry, CHANGELOG.md modified or added as a plain file
+    f=$(git diff-tree --no-commit-id -r --raw --no-abbrev --ignore-submodules=none "$c")
+    case "$f" in
+      *$'\n'*) f="" ;;
+      ":100644 100644 "*" M	CHANGELOG.md"|":000000 100644 "*" A	CHANGELOG.md") ;;
+      *) f="" ;;
+    esac
+    [ "$s" = "docs(changelog): $TAG [skip ci]" ] && [ -n "$f" ] \
       || fail "commit $(short "$c") ('$s') was pushed to main after $TAG and is not its changelog commit"
   done
   ok "every commit brought from main is in $TAG or is its changelog commit"
@@ -242,8 +253,10 @@ compare_blobs() {  # $1 = path, $2 = its blob at M, $3 = its blob at C
   local f=$1 old="$TMPD/old" new="$TMPD/new" diffs n minus plus owner max pairs=0
   git cat-file blob "$2" > "$old"
   git cat-file blob "$3" > "$new"
+  [ "$(tr -d '\000' < "$old" | wc -c)" -eq "$(wc -c < "$old")" ] && [ "$(tr -d '\000' < "$new" | wc -c)" -eq "$(wc -c < "$new")" ] \
+    || fail "$f: a NUL byte in the file"
   [ "$(tail -c1 "$old")" = "$(tail -c1 "$new")" ] || fail "$f: the open-cycle commit changes the last line ending"
-  diffs=$(awk 'FILENAME==ARGV[1]{a[FNR]=$0; na=FNR; next} {nb=FNR} FNR>na || a[FNR]!=$0 {print FNR} END{if (nb+0!=na+0) print "count"}' "$old" "$new")
+  diffs=$(awk 'FILENAME==ARGV[1]{a[FNR]=$0; na=FNR; next} {nb=FNR} FNR>na || (a[FNR] "") != ($0 "") {print FNR} END{if (nb+0!=na+0) print "count"}' "$old" "$new")
   case "$diffs" in *count*) fail "$f: the open-cycle commit adds or removes lines" ;; esac
   case "$f" in
     package-lock.json) max=2 ;;
@@ -261,11 +274,17 @@ compare_blobs() {  # $1 = path, $2 = its blob at M, $3 = its blob at C
     [ "$f" != "$LOCK" ] || LOCK_DIFFS="$LOCK_DIFFS $n"
     # a lockfile's changed line must be the project's own, not a dependency's
     case "$f" in
+      pyproject.toml)
+        owner=$(awk -v n="$n" '{sub(/\r$/, "")} /^\[/{h=$0; sub(/[[:space:]]+$/, "", h)} FNR==n{print h; exit}' "$new")
+        [ "$owner" = "[project]" ] || fail "pyproject.toml: line $n is not the [project] table's version ($owner)" ;;
+      package.json)
+        owner=$(awk -v n="$n" 'FNR<n && /\{[[:space:]]*$/{k=$0; sub(/[[:space:]]+$/, "", k)} FNR==n{print k; exit}' "$new")
+        [ "$owner" = "{" ] || fail "package.json: line $n is not the top-level version ($owner)" ;;
       uv.lock)
-        owner=$(awk -v n="$n" '/^\[/{h=$0} /^name = "/{nm=$0} FNR==n{print h " " nm; exit}' "$new")
+        owner=$(awk -v n="$n" '{sub(/\r$/, "")} /^\[/{h=$0} /^name = "/{nm=$0} FNR==n{print h " " nm; exit}' "$new")
         [ "$owner" = "[[package]] name = \"$PROJ\"" ] || fail "uv.lock: line $n is not in the $PROJ package block ($owner)" ;;
       package-lock.json)
-        owner=$(awk -v n="$n" 'FNR<n && /\{[[:space:]]*$/{k=$0} FNR==n{print k; exit}' "$new")
+        owner=$(awk -v n="$n" 'FNR<n && /\{[[:space:]]*$/{k=$0; sub(/[[:space:]]+$/, "", k)} FNR==n{print k; exit}' "$new")
         case "$owner" in
           '{'|*'"": {'*) ;;
           *) fail "package-lock.json: line $n is not the root package's version ($owner)" ;;
@@ -277,7 +296,7 @@ compare_blobs() {  # $1 = path, $2 = its blob at M, $3 = its blob at C
 # The files it changes, from the raw diff read NUL-delimited, which neither word
 # splitting, globbing nor the quoting of an unusual name can alter.
 CHANGED=""; SOT_CHANGED=0; LOCK_DIFFS=""
-git diff --raw -z --no-abbrev --no-renames "$M" "$C" > "$TMPD/raw"
+git diff --raw -z --no-abbrev --no-renames --ignore-submodules=none "$M" "$C" > "$TMPD/raw"
 while IFS= read -r -d '' meta && IFS= read -r -d '' f; do
   IFS=' ' read -r om nm ob nb st <<EOF
 $meta
@@ -300,10 +319,10 @@ project_version_lines() {  # $1 = the lockfile at M; prints those lines' numbers
   case "$LOCK" in
     uv.lock)
       awk -v p="name = \"$PROJ\"" -v v="version = \"$V_MAIN\"" \
-        '/^\[/{h=$0; own=0} h=="[[package]]" && $0==p {own=1} own && $0==v {print FNR}' "$1" ;;
+        '{sub(/\r$/, "")} /^\[/{h=$0; own=0} h=="[[package]]" && $0==p {own=1} own && $0==v {print FNR}' "$1" ;;
     package-lock.json)
       awk -v v="\"version\": \"$V_MAIN\"" \
-        '(k=="{" || index(k, "\"\": {")) && index($0, v) {print FNR} /\{[[:space:]]*$/{k=$0}' "$1" ;;
+        '(k=="{" || index(k, "\"\": {")) && index($0, v) {print FNR} /\{[[:space:]]*$/{k=$0; sub(/[[:space:]]+$/, "", k)}' "$1" ;;
   esac
 }
 if git cat-file -e "$M:$LOCK" 2>/dev/null; then

@@ -28,9 +28,9 @@ class CheckCase(unittest.TestCase):
     sb: Sandbox
     repo: ReleasedRepo
 
-    def check(self, base, head, main="origin/main", tag=None, cwd=None):
+    def check(self, base, head, main="origin/main", tag=None, cwd=None, env=None):
         args = [base, head, main] + ([tag] if tag else [])
-        return self.sb.script("back-merge-check", *args, cwd=cwd or self.repo.releaser)
+        return self.sb.script("back-merge-check", *args, cwd=cwd or self.repo.releaser, env=env)
 
     def assertOutcome(self, expected, result, fragment=None):
         msg = f"\n{result.stdout}\n{result.stderr}"
@@ -522,6 +522,109 @@ class RealSizedLockfiles(CheckCase):
         r, base = self.build("package", "3.5.2-dev0")
         self.assertGreater((r.releaser / "package-lock.json").stat().st_size, 300_000)
         self.assertOutcome(PASS, self.check(base, "HEAD", tag="v3.5.1"), "3.5.1 -> 3.5.2-dev0")
+
+
+class SecondReview(CheckCase):
+    """The cases of the second adversarial review of the check."""
+
+    def build(self, kind="pyproject", on_develop=None, **kw):
+        """A released repository, the merge M of main into develop on a branch, and
+        base; on_develop(worktree) may first add a commit to develop."""
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, kind, changelog=False, **kw)
+        r.g("fetch", "-q", "origin")
+        if on_develop:
+            r.g("switch", "-q", "develop")
+            r.g("merge", "-q", "--ff-only", "origin/develop")
+            on_develop(r.releaser)
+            r.g("push", "-q", "origin", "develop")
+            r.g("fetch", "-q", "origin")
+        base = r.g("rev-parse", "origin/develop")
+        r.g("switch", "-q", "-c", "back-merge", "origin/develop")
+        r.g("merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop")
+        return r, base
+
+    def test_a_submodule_set_to_ignore_all_is_still_seen(self):
+        def add_submodule(wt):
+            (wt / ".gitmodules").write_text('[submodule "vendor/lib"]\n\tpath = vendor/lib\n'
+                                            '\turl = ../lib.git\n\tignore = all\n')
+            self.repo.g("add", ".gitmodules")
+            self.repo.g("update-index", "--add", "--cacheinfo", f"160000,{self.repo.promoted},vendor/lib")
+            self.repo.g("commit", "-q", "-m", "chore: vendor lib (#4)")
+        r, base = self.build(on_develop=lambda wt: add_submodule(wt))
+        r.set_version(r.releaser, "0.1.2.dev0")
+        r.g("add", "pyproject.toml", "uv.lock")
+        r.g("update-index", "--cacheinfo", f"160000,{r.tag_commit},vendor/lib")
+        r.g("commit", "-q", "-m", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "changes vendor/lib")
+
+    def test_a_nul_byte_in_the_version_file(self):
+        r, base = self.build()
+        r.set_version(r.releaser, "0.1.2.dev0")
+        text = (r.releaser / "pyproject.toml").read_bytes()
+        (r.releaser / "pyproject.toml").write_bytes(text.replace(b'"0.1.2.dev0"', b'"0.1.2.dev0"\x00'))
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "a NUL byte")
+
+    def test_a_numeric_line_changed_to_an_equal_number(self):
+        r, base = self.build(pyproject_head="[tool.x]\nlevels = [\n  1,\n  3\n]\n\n")
+        r.set_version(r.releaser, "0.1.2.dev0")
+        text = (r.releaser / "pyproject.toml").read_text()
+        (r.releaser / "pyproject.toml").write_text(text.replace("\n  3\n", "\n  3.0\n"))
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"))
+
+    def test_crlf_package_files(self):
+        r, base = self.build("package", crlf=True)
+        self.assertIn(b"\r\n", (r.releaser / "package-lock.json").read_bytes())
+        m = r.g("rev-parse", "HEAD")
+        r.set_version(r.releaser, "3.5.2-dev0")
+        r.g("commit", "-q", "-am", "chore: open 3.5.2-dev0 dev cycle")
+        self.assertOutcome(PASS, self.check(base, "HEAD", tag="v3.5.1"))
+        # the top-level version left behind in the lockfile
+        r.g("switch", "-q", "-c", "stale", m)
+        set_package_version(r.releaser, "3.5.2-dev0", lock=False)
+        raw = (r.releaser / "package-lock.json").read_bytes().decode()
+        lock = json.loads(raw)
+        lock["packages"][""]["version"] = "3.5.2-dev0"
+        (r.releaser / "package-lock.json").write_bytes(
+            (json.dumps(lock, indent=2) + "\n").replace("\n", "\r\n").encode())
+        r.g("commit", "-q", "-am", "chore: open 3.5.2-dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD"), "package-lock.json still records 3.5.1 for the project at line 3")
+
+    def test_collation_does_not_hide_a_change(self):
+        # macOS awk compares strings with strcoll under a UTF-8 locale, where a
+        # zero-width space compares equal to nothing
+        r, base = self.build()
+        r.set_version(r.releaser, "0.1.2.dev0")
+        text = (r.releaser / "pyproject.toml").read_text()
+        (r.releaser / "pyproject.toml").write_text(text.replace('["idna"]', '["idna\u200b"]'))
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1", env={"LC_ALL": "en_US.UTF-8"}))
+
+    def test_a_version_line_outside_the_project_table(self):
+        # a [tool] table's version before [project]: the version the guard reads
+        # is not the project's, and a change to it is not the open cycle
+        r, base = self.build(pyproject_head='[tool.x]\nversion = "0.0.9"\n\n')
+        r.set_version(r.releaser, "0.1.2.dev0")
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "is not the [project] table's version ([tool.x])")
+
+    def test_a_changelog_commit_that_changes_the_files_mode(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject")
+        r.g("fetch", "-q", "origin")
+        r.g("switch", "-q", "-c", "bot", "origin/main")
+        (r.releaser / "CHANGELOG.md").chmod(0o755)
+        r.g("commit", "-q", "-am", "docs(changelog): v0.1.1 [skip ci]")
+        r.g("push", "-q", "origin", "HEAD:main")
+        r.g("fetch", "-q", "origin")
+        base = r.g("rev-parse", "origin/develop")
+        r.g("switch", "-q", "-c", "back-merge", "origin/develop")
+        r.g("merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "is not its changelog commit")
 
 
 class CopiesAgree(unittest.TestCase):
