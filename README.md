@@ -4,7 +4,7 @@ Shared developer tooling for repos under [`ParkviewLab/`](https://github.com/Par
 
 ## Install
 
-Clone once, run `install.sh`. The installer symlinks every **executable** script in `scripts/` into `~/.local/bin/`, so each is on `$PATH` under its file name: `git-<verb>` for the version helpers, `build-pages-site` for the site builder, `generate-changelog` for the changelog generator (a dry run or a repair runs it from a dev-tools worktree at the pinned release instead; see its section).
+Clone once, run `install.sh`. The installer symlinks every **executable** script in `scripts/` into `~/.local/bin/`, so each is on `$PATH` under its file name: `git-<verb>` for the version helpers and `git back-merge`, `back-merge-check` for the check that `git back-merge` and the version guard run, `build-pages-site` for the site builder, `generate-changelog` for the changelog generator (a dry run or a repair runs it from a dev-tools worktree at the pinned release instead; see its section).
 
 ```bash
 git clone git@github.com:ParkviewLab/dev-tools.git ~/dev-tools
@@ -21,11 +21,12 @@ Updates: `git pull`. Because the installer **symlinks** (not copies), a changed 
 - `python3` (3.13) for `build-pages-site`, which uses the standard library only.
 - `uv` for `generate-changelog`, which runs under `uv run --script`: uv provides Python 3.13, downloading it where the machine has none, and installs the `anthropic` SDK at the exact version the script declares, with that SDK's dependencies as PyPI held them at the script's `exclude-newer` date, for its Highlights call. The script also needs git 2.38 or later, for `git merge-tree --write-tree`.
 - Per the repo's version source of truth: `uv` for `pyproject.toml`, `node`/`npm` for `package.json`, nothing extra for `VERSION.txt`.
-- `gh` (GitHub CLI) for `git dev-release`, and for `generate-changelog`, which reads the repository's merged pull requests through it.
+- `gh` (GitHub CLI) for `git dev-release` and `git back-merge`, and for `generate-changelog`, which reads the repository's merged pull requests through it.
+- git 2.38 or later for `back-merge-check` and `git back-merge`, which use `git merge-tree --write-tree`.
 
 ## The version helpers
 
-`git release`, `git bump`, and `git dev-release` are **source-of-truth aware** — each auto-detects and operates on whichever the repo uses:
+`git release`, `git bump`, `git dev-release` and `git back-merge` are **source-of-truth aware** — each auto-detects and operates on whichever the repo uses:
 
 | Source of truth | read / written via |
 |---|---|
@@ -71,20 +72,53 @@ From a plain (non-dev) version, `<kind>` is just the normal increment.
 
 ### `git dev-release` — on-demand dev build
 
-Run from `develop`. Bumps the source of truth to the next **dev** version, commits, pushes `develop`, and dispatches the repo's `dev-release.yml`, which builds the dev counterpart of each of the repo's publish targets that has one (the handbook's [`releases.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md#development-versioning)); in a repo without that workflow the bump and the push still happen, and the dispatch fails. For real releases use `git bump` / `git release`.
+A dev build is a candidate for local testing: the dev counterpart of each of the repo's publish targets that has one (the handbook's [`releases.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md#development-versioning)). `git dev-release` follows the repo's `dev-release.yml` as it stands on `origin/develop`:
+
+- Where the workflow declares the `kind` input, the build takes its version in the CI workspace, computed from the newest release tag, the kind and the run number, and nothing is committed: the command dispatches the workflow on `develop` with that input.
+- Where it does not, as in a repo that has not yet switched to merge commits, the command bumps the source of truth to the next **dev** version of the chosen target, commits, pushes `develop` and dispatches the workflow, as before; run it from `develop`. In a repo without that workflow the bump and the push still happen, and the dispatch fails.
+
+For real releases use `git bump` / `git release`, and `git back-merge` after them.
 
 ```bash
-git dev-release patch       # next dev build toward the next patch
-git dev-release minor       # re-points the cycle to the next minor (major likewise)
-git dev-release --open      # open the next cycle post-release: X.Y.(Z+1).dev0 (X.Y.(Z+1)-dev0 for package.json; no publish)
+git dev-release patch       # a dev build toward the next patch
+git dev-release minor       # ...toward the next minor (major likewise)
+git dev-release --open      # before the switch only: open the next cycle, X.Y.(Z+1).dev0 (X.Y.(Z+1)-dev0 for package.json); no publish
 git dev-release --dry-run patch
 ```
 
-- **A dev version names the *next* release** plus a pre-release marker: `.devN` (PEP 440) for `pyproject.toml`, as in `0.1.5 < 0.1.6.dev0 < 0.1.6`, and `-devN` (semver, which npm and electron-builder require) for `package.json`. Builds toward the same target tick the counter (`dev0`, `dev1`, …) so each published artifact is distinct (TestPyPI rejects duplicates).
-- **`--open`** is run right after a release (part of the back-merge cascade) to set `develop`'s honest version to the next-patch placeholder.
-- `VERSION.txt` repos get a plain `-dev` marker and publish nothing — the dev *build* path is code-repo-only.
+- **A dev version names the *next* release** plus a pre-release marker: `.devN` (PEP 440) for `pyproject.toml`, as in `0.1.5 < 0.1.6.dev0 < 0.1.6`, and `-devN` (semver, which npm and electron-builder require) for `package.json`. Builds toward the same target take distinct numbers (`dev0`, `dev1`, …), so each published artifact is distinct (TestPyPI rejects duplicates).
+- **Before a repo's switch to merge commits**, `--open` is run right after a release, with the direct back-merge, to set `develop`'s honest version to the next-patch placeholder. Once the repo allows merge commits, `develop` takes no direct push: the open cycle arrives as the second commit of the back-merge pull request (`git back-merge`, below), so `--open` refuses there, and so does a dev build whose workflow lacks the `kind` input.
+- **A `VERSION.txt` repo** has no dev build and skips the open cycle, as the handbook's `releases.md` says, so the command refuses there.
 
 The full convention — when to open a cycle, how it interacts with `version-guard` and the release gate — is the **[handbook's `releases.md`](https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md) ("Development versioning")** + `ci.md` (`dev-release.yml`). dev-tools is the *tooling*; the handbook is the source of truth for the *flow*.
+
+### `git back-merge` — the release back into develop, by pull request
+
+In a repo that merges pull requests with merge commits, a release ends with `git back-merge` rather than a direct push to `develop`: the release on `main` comes back into `develop` through a pull request that `develop`'s protection and the version guard's back-merge mode examine. Run it from any worktree of the repo, under the release ask, which covers the command's merge of its own pull request and its force push of its own branch, and nothing else.
+
+```bash
+git back-merge             # the newest release tag
+git back-merge v1.2.3      # a named release tag
+git back-merge --dry-run   # build and check locally; push, open and merge nothing
+```
+
+It waits first for the release's workflow runs to conclude and for the changelog commit, where the release writes one, to reach `main`; a release whose changelog job failed is accepted once the repair is in place, that commit on `main` and a GitHub Release for the tag. In a temporary worktree it then builds `back-merge-<tag>` from `origin/develop` with `git merge --no-ff origin/main`, and in a repo whose version is in `pyproject.toml` or `package.json` adds the open-cycle commit, `chore: open X.Y.(Z+1).dev0 dev cycle`, written by `_sot.sh`. It checks the result with `back-merge-check`, pushes the branch, opens the pull request `chore(release): back-merge main into develop after <tag>` with the label `release-bookkeeping` (created if absent), waits for `develop`'s required checks, and merges with `--merge --match-head-commit`, never `--admin`.
+
+Each step first tests whether it is done, so a second run after an interruption resumes. An open pull request whose head contains `develop` and passes the check is taken as it is; one that `develop` has moved beyond is rebuilt from the new `develop` and force-pushed, never updated with GitHub's "Update branch", which the check refuses. If `develop` moves while the checks run in a repo that requires up-to-date branches, the branch is rebuilt, and after three rebuilds the command gives up, leaving the pull request open. It refuses before merging when a version change reached `develop` during the release, which would conflict on the version line, and refuses any other conflict when it merges; each refusal names its remedy. In a repo that does not yet allow merge commits it refuses and quotes the handbook's `releases.md`, whose direct back-merge is still in force there. Afterwards it removes its worktree and branch, fast-forwards the local `develop` worktree, and lists the open pull requests into `develop` that do not yet contain it, merging into none of them.
+
+It reads `GIT_BACK_MERGE_POLL` (seconds between polls, default 15), `GIT_BACK_MERGE_TIMEOUT` (seconds to wait for the release and for the checks, default 3600) and `PARKVIEWLAB_HANDBOOK` (the released handbook's worktree, default `<org root>/handbook/handbook-main`).
+
+### `back-merge-check` — what a back-merge pull request may bring
+
+```bash
+back-merge-check <base> <head> [<main-ref>] [<tag>]
+```
+
+It passes only when the commits that `head` brings and that neither `base` nor `main` has are one merge of `main` into `develop`, identical to the automatic merge of its parents, and, in a repo whose version is in `pyproject.toml` or `package.json`, one following commit that changes only the version lines of the version file and its lockfile, from `main`'s version to the next-patch placeholder. With a tag, everything brought from `main` must be in the tag or be its changelog commit, and `main`'s version must be the tag's. A `VERSION.txt` repo skips the open cycle, so a second commit there is refused, and a shallow repository is refused outright. The version guard runs the check in its back-merge mode, checked out from dev-tools at a pinned release, and `git back-merge` runs it on its own branch before pushing, so both apply one rule. The conditions are specified at the head of [`scripts/back-merge-check`](scripts/back-merge-check). The exit status is 0 when the check passes, 1 when it fails, and 2 on a usage or repository error.
+
+### Tests
+
+`tests/test_back_merge_check.py` builds, in temporary repositories, every case of the simulation that stands behind the design (the proposal "Real merges and the back-merge pull request"), with the `VERSION.txt` open-cycle commit now refused, and further cases: a lockfile line that belongs to a dependency, a repo without a lockfile, tag names and exit codes. `tests/test_git_back_merge.py` and `tests/test_git_dev_release.py` run the two commands end to end against a bare origin, with fakes of `gh`, `uv` and `npm` from `tests/backmerge_support.py`: the fake GitHub keeps its state in a JSON file, its pull-request merge really merges into the origin's `develop`, and it evaluates `--jq` filters with the system `jq`. The tests run the scripts under the `bash` on `PATH`, or the one `BACKMERGE_TEST_BASH` names, so the same tests run under macOS's bash 3.2 and the runners' bash 5.
 
 ## `build-pages-site` — build a repo's documentation site
 
@@ -224,7 +258,7 @@ assemble-workflows --handbook ~/dev/github/ParkviewLab/handbook/handbook-main   
 assemble-workflows --handbook ~/dev/github/ParkviewLab/handbook/handbook-main --check  # compare only
 ```
 
-`--check` writes nothing and reports each difference from the assembly, naming the job it falls in. It exits 0 when every workflow matches or every difference is a declared slot, 1 when a difference is undeclared, and 2 on a usage or declaration error, so CI and the convention auditor can run it.
+`--check` writes nothing and reports each difference from the assembly, naming the job it falls in. A pin of a dev-tools release, the `ref:` line of a step that checks out `ParkviewLab/dev-tools`, is the repo's own: the handbook's pin rule lets it differ from the part's, since a pin at or after its floor is current, so the check leaves it out of the comparison and prints it on a line of its own, for the convention auditor and the release preflight to judge by that rule; and writing the workflows keeps the repo's own pin in each job rather than the part's. It exits 0 when every workflow matches or every difference is a declared slot, 1 when a difference is undeclared, and 2 on a usage or declaration error, so CI and the convention auditor can run it.
 
 What a repo publishes, and where it differs from the parts on purpose, is declared in `.github/workflows/.assembly.toml`:
 
@@ -245,7 +279,7 @@ A repo with no such file has its targets read from the jobs its `release.yml` al
 
 ### Tests
 
-`tests/test_assemble_workflows.py` builds a small handbook of parts and a repo in a temporary directory for each case: the target combinations in use and all four together in the recipe's order, the installers download step kept and dropped, the documents target's own final job, the header on both workflows, a stale dev workflow removed, an inferred declaration, the job a difference is attributed to (a leading comment belongs to the job it introduces), a declared slot passing the check and an undeclared difference failing it, a slot's scope over the two workflows, and each declaration error. The parts the fixtures build are shaped like the handbook's own, leading blank line and comment block included, since the attribution depends on them. Standard-library `unittest`, no network.
+`tests/test_assemble_workflows.py` builds a small handbook of parts and a repo in a temporary directory for each case: the target combinations in use and all four together in the recipe's order, the installers download step kept and dropped, the documents target's own final job, the header on both workflows, a stale dev workflow removed, an inferred declaration, the job a difference is attributed to (a leading comment belongs to the job it introduces), a declared slot passing the check and an undeclared difference failing it, a slot's scope over the two workflows, a dev-tools pin left to the pin rule by the check and kept by the assembly, and each declaration error. The parts the fixtures build are shaped like the handbook's own, leading blank line and comment block included, since the attribution depends on them. Standard-library `unittest`, no network.
 
 ## Release flow (in brief)
 
@@ -256,7 +290,7 @@ Releases are tag-driven and cut from `main`; CI gates publish on the tag being r
 git bump <patch|minor|major|release>
 git release
 git push --follow-tags        # CI publishes
-# then back-merge main -> develop
+git back-merge                # a repo that allows merge commits; before its switch, the direct back-merge of releases.md
 ```
 
 dev-tools is itself a `VERSION.txt` repo and is **released with these very tools** — `VERSION.txt` is the source of truth, bumped by `git bump` and tagged by `git release`. It ships no package, so a release promotes `develop → main` and tags, and the tag's push runs `.github/workflows/release.yml`, the handbook's documents assembly (`head.yml` + `gate.yml` + `documents.yml`) byte for byte: the three-check gate (the tag equals `VERSION.txt`, the tagged commit is on `main`, the version is greater than the previous tag's), then a GitHub Release with GitHub's generated notes. The gate runs once the tag exists, so it reports a bad tag but cannot prevent it. A ruleset on dev-tools refuses the move or deletion of any `v*` tag and names no bypass actor, so the gate's advice to re-tag from `main` cannot be followed here: a tag whose release run fails stays, no pin moves to it, and the next patch release supersedes it.
