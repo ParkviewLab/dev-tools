@@ -55,15 +55,15 @@ sot_read_at() {  # $1 = commit, $2 = kind (from sot_kind_at); echoes the version
 }
 
 # --- write -----------------------------------------------------------------
-sot_write() {  # $1 = new version. writes it; echoes the file(s) to `git add`.
+sot_write() {  # $1 = new version. writes it; echoes the file(s) to `git add`; 1 if the writer fails.
   local v="$1" files
   case "$(sot_kind)" in
     pyproject)
-      uv version "$v" >/dev/null
+      uv version "$v" >/dev/null || return 1
       files="pyproject.toml"
       [[ -n "$(git status --porcelain uv.lock 2>/dev/null)" ]] && files="$files uv.lock" ;;
     package)
-      npm version "$v" --no-git-tag-version --allow-same-version >/dev/null
+      npm version "$v" --no-git-tag-version --allow-same-version >/dev/null || return 1
       files="package.json"
       [[ -n "$(git status --porcelain package-lock.json 2>/dev/null)" ]] && files="$files package-lock.json" ;;
     version-txt)

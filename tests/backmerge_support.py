@@ -138,6 +138,8 @@ FAKE_UV = r'''#!/usr/bin/env python3
 import os, re, subprocess, sys
 a = sys.argv[1:]
 if a[:1] == ["version"] and len(a) >= 2:
+    if os.environ.get("FAKE_UV_LOG"):
+        open(os.environ["FAKE_UV_LOG"], "a").write("UV_NO_SYNC=%s\n" % os.environ.get("UV_NO_SYNC", ""))
     v = [x for x in a[1:] if not x.startswith("-")][0]
     text = open("pyproject.toml").read()
     name = re.sub(r"[-_.]+", "-", re.search(r'(?m)^name = "([^"]*)"', text).group(1)).lower()
@@ -149,6 +151,8 @@ if a[:1] == ["version"] and len(a) >= 2:
             elif l == 'name = "%s"\n' % name: inside = True
             elif inside and l.startswith('version = "'): lines[i] = 'version = "%s"\n' % v; inside = False
         open("uv.lock", "w").write("".join(lines))
+    if os.environ.get("FAKE_UV_FAIL"):   # as when the sync after the re-lock fails
+        sys.stderr.write("error: Failed to build the project\n"); sys.exit(1)
     sys.exit(0)
 if a[:1] == ["run"]:
     rest = [x for x in a[1:] if x != "--quiet"]
@@ -183,6 +187,12 @@ SP = os.environ["FAKE_GH_STATE"]
 st = json.load(open(SP))
 argv = sys.argv[1:]
 st.setdefault("calls", []).append(argv)
+st.setdefault("gh_repo", []).append(os.environ.get("GH_REPO"))
+for once in st.get("fail_once", []):   # a transient failure of the first such call
+    if argv[:len(once.split())] == once.split():
+        st["fail_once"].remove(once); st.setdefault("failed_once", []).append(once)
+        json.dump(st, open(SP, "w"), indent=1)
+        sys.stderr.write("HTTP 502: Bad Gateway\n"); sys.exit(1)
 
 def save():
     json.dump(st, open(SP, "w"), indent=1)
@@ -226,13 +236,16 @@ def is_ancestor(a, b):
 
 def pr_by(key):
     for p in st.get("prs", []):
-        if str(p["number"]) == str(key) or (p["state"] == "OPEN" and p["head"] == key):
+        if str(p["number"]) == str(key) or (p["state"] == "OPEN" and p["head"] == key and not p.get("fork")):
             return p
     return None
 
 def pr_view(p):
     head = ref("refs/heads/" + p["head"]) if p["state"] == "OPEN" else p.get("mergedHead") or p.get("closedHead")
+    if p.get("fork"):
+        head = p["forkHead"]   # the branch lives in the fork, not in origin
     return {"number": p["number"], "state": p["state"], "headRefName": p["head"], "headRefOid": head,
+            "isCrossRepository": bool(p.get("fork")),
             "baseRefName": p["base"], "title": p["title"], "url": p["url"], "labels": [{"name": l} for l in p["labels"]]}
 
 def merge(p):
@@ -248,6 +261,17 @@ def merge(p):
     finally:
         shutil.rmtree(tmp)
     p["state"] = "MERGED"; p["mergedHead"] = head
+
+def push_branch_commit(branch, name):
+    tmp = tempfile.mkdtemp()
+    try:
+        git("clone", "-q", "--branch", branch, ORIGIN, tmp + "/c")
+        open(tmp + "/c/" + name + ".txt", "w").write(name + "\n")
+        git("add", name + ".txt", cwd=tmp + "/c")
+        git("commit", "-q", "-m", "fix: %s" % name, cwd=tmp + "/c")
+        git("push", "-q", "origin", branch, cwd=tmp + "/c")
+    finally:
+        shutil.rmtree(tmp)
 
 def push_develop_commit(tag):
     tmp = tempfile.mkdtemp()
@@ -353,6 +377,8 @@ if cmd == ["pr", "checks"]:
     c["_total"] = c.get("_total", 0) + 1
     if c["_total"] in c.get("move_develop_on", []) or c.get("move_develop_always"):
         push_develop_commit("moved-%d" % c["_total"])
+    if c["_total"] == c.get("push_foreign_on"):
+        push_branch_commit(p["head"], "foreign")   # a push by another hand, or "Update branch"
     if c["_total"] == c.get("merged_by_another_hand_on"):
         merge(p)   # a person presses the merge button while the command polls
     if c["_polls"] <= c.get("pending_polls", 0):
@@ -367,6 +393,9 @@ if cmd == ["pr", "merge"]:
         fail("fake gh: --admin is refused by this test")
     if "--merge" not in argv:
         fail("fake gh: only merge commits are allowed")
+    if st.get("move_develop_before_merge", 0) > 0:
+        st["move_develop_before_merge"] -= 1
+        push_develop_commit("moved-at-merge")
     head = ref("refs/heads/" + p["head"])
     if opt("--match-head-commit") != head:
         fail("Head branch was modified. Review and try the merge again.")
