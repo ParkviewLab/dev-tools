@@ -120,25 +120,38 @@ handbook_dir() {
   if [[ -n "${PARKVIEWLAB_HANDBOOK:-}" ]]; then echo "$PARKVIEWLAB_HANDBOOK"; return; fi
   echo "$(dirname "$(dirname "$COMMON")")/handbook/handbook-main"
 }
+# The handbook's releases.md gives the release's end for a repository that has not
+# switched in the section headed "Until a repository has switched"; its heading is
+# the contract between the two repositories. Until that section is released, the
+# section "After the release" gives the direct back-merge, and is quoted only while
+# it still does.
+TRANSITION_HEADING="## Until a repository has switched"
+section() {  # $1 = file, $2 = heading line; prints that section, heading included
+  awk -v h="$2" '$0==h{p=1; print; next} p && /^## /{exit} p{print}' "$1"
+}
 quote_transition() {  # the released handbook's text for a repository not yet switched
-  local f heading
+  local f heading url
   f="$(handbook_dir)/docs/releases.md"
-  if [[ ! -f "$f" ]]; then
-    echo "  https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md"
-    return
+  url="https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md"
+  if [[ ! -f "$f" ]]; then echo "  $url"; return; fi
+  heading="$(awk -v h="$TRANSITION_HEADING" '!f && $0==h{print; f=1}' "$f")"
+  if [[ -z "$heading" ]]; then
+    heading="$(awk '!f && /^## After the release/{print; f=1}' "$f")"
+    if [[ -n "$heading" ]] && ! section "$f" "$heading" | grep -F 'merge --no-ff' >/dev/null; then heading=""; fi
   fi
-  heading="$(grep -E '^## .*[Tt]ransition' "$f" | head -1 || true)"
-  if [[ -z "$heading" ]]; then heading="$(grep -E '^## After the release' "$f" | head -1 || true)"; fi
-  if [[ -z "$heading" ]]; then echo "  $f"; return; fi
+  if [[ -z "$heading" ]]; then echo "  $f (or $url): the section \"${TRANSITION_HEADING#"## "}\""; return; fi
   echo "  (from $f)"
-  awk -v h="$heading" '$0==h{p=1; print "  " $0; next} p && /^## /{exit} p{print "  " $0}' "$f"
-  case "$heading" in
-    *[Tt]ransition*) ;;
-    *) echo "  Then, in a repository whose version is in pyproject.toml or package.json, open the next cycle: git dev-release --open (releases.md, \"Development versioning\")." ;;
-  esac
+  section "$f" "$heading" | sed 's/^/  /'
+  if [[ "$heading" != "$TRANSITION_HEADING" ]]; then
+    echo "  Then, in a repository whose version is in pyproject.toml or package.json, open the next cycle: git dev-release --open (releases.md, \"Development versioning\")."
+  fi
 }
 step "3. the switch"
 AMC="$(gh api "repos/$SLUG" --jq .allow_merge_commit)" || die "gh cannot read $SLUG's settings"
+case "$AMC" in
+  true|false) ;;
+  *) die "gh read no allow_merge_commit setting for $SLUG ('$AMC'); GitHub returns it only to a caller with admin rights on the repository" ;;
+esac
 if [[ "$AMC" != true ]]; then
   {
     echo "git back-merge: $SLUG does not allow merge commits, so it has not switched to real merges."
@@ -380,10 +393,16 @@ $old_prs
 EOF
 
 # --- 11 and 12. wait for the checks; merge -----------------------------------------------------
-PROT="$(gh api "repos/$SLUG/branches/develop/protection" \
-         --jq '[(.required_status_checks.strict // false | tostring), ((.required_status_checks.contexts // []) | join(","))] | @tsv' 2>/dev/null || true)"
-STRICT="${PROT%%"$TAB"*}"; CONTEXTS="${PROT#*"$TAB"}"
-[[ -n "$PROT" ]] || { STRICT=false; CONTEXTS=""; }
+# On an HTTP error gh prints the response body on stdout, so success is read from
+# its exit status. Required checks are listed one per line: a matrix job's name
+# holds a comma.
+if STRICT="$(gh api "repos/$SLUG/branches/develop/protection" --jq '.required_status_checks.strict // false' 2>/dev/null)" \
+   && CONTEXTS="$(gh api "repos/$SLUG/branches/develop/protection" --jq '(.required_status_checks.contexts // [])[]' 2>/dev/null)"; then
+  :
+else
+  STRICT=false; CONTEXTS=""
+  say "develop's protection cannot be read (develop is unprotected, or gh lacks admin rights): waiting for every check reported on #$PR_NUM"
+fi
 wait_for_checks() {  # 11. 0 = the required checks passed on HEAD_SHA; exits on a failure
   local deadline out head_now missing bad c b
   deadline=$(( $(date +%s) + TIMEOUT ))
@@ -395,16 +414,17 @@ wait_for_checks() {  # 11. 0 = the required checks passed on HEAD_SHA; exits on 
     else
       out="$(gh pr checks "$PR_NUM" --json name,bucket --jq '.[] | [.name, .bucket] | @tsv' 2>/dev/null || true)"
       if [[ -n "$CONTEXTS" ]]; then
-        local IFS=,
-        for c in $CONTEXTS; do
+        while IFS= read -r c; do
+          [[ -n "$c" ]] || continue
           b="$(printf '%s\n' "$out" | awk -F"$TAB" -v n="$c" '!f && $1==n{print $2; f=1}')"
           case "$b" in
             pass|skipping) ;;
-            fail|cancel) bad="$bad $c" ;;
-            *) missing="$missing $c" ;;
+            fail|cancel) bad="$bad '$c'" ;;
+            *) missing="$missing '$c'" ;;
           esac
-        done
-        unset IFS
+        done <<EOF
+$CONTEXTS
+EOF
       else
         [[ -n "$out" ]] || missing=" (no checks reported yet)"
         while IFS="$TAB" read -r c b; do
@@ -423,6 +443,10 @@ EOF
   done
 }
 REBUILDS=0
+landed() {  # the tag has reached origin/develop: this pull request merged, by any hand
+  git fetch --quiet origin develop
+  ancestor "$TAGC" origin/develop
+}
 develop_moved_rebuild() {  # back to 6: a head built before develop moved
   REBUILDS=$((REBUILDS + 1))
   (( REBUILDS <= MAX_REBUILDS )) || die "develop moved $MAX_REBUILDS times while #$PR_NUM's checks ran; #$PR_NUM is left open; run git back-merge again when develop is quiet"
@@ -433,23 +457,28 @@ while :; do
   step "11. develop's required checks on #$PR_NUM"
   wait_for_checks
   say "passed on $(git rev-parse --short "$HEAD_SHA")"
-  git fetch --quiet origin develop
+  if landed; then say "$TAG has reached origin/develop while the checks ran; #$PR_NUM is not merged again"; break; fi
   if [[ "$STRICT" == true ]] && ! ancestor origin/develop "$HEAD_SHA"; then
     develop_moved_rebuild; continue
   fi
   step "12. merge #$PR_NUM"
   if gh pr merge "$PR_NUM" --merge --match-head-commit "$HEAD_SHA"; then break; fi
-  git fetch --quiet origin develop
+  if landed; then say "gh reported a failure, but $TAG has reached origin/develop"; break; fi
   if [[ "$STRICT" == true ]] && ! ancestor origin/develop "$HEAD_SHA"; then
     develop_moved_rebuild; continue
   fi
   die "GitHub refused to merge #$PR_NUM; it is left open"
 done
 state="$(gh pr view "$PR_NUM" --json state --jq .state || true)"
-[[ "$state" == MERGED ]] || die "#$PR_NUM reads '$state' after the merge, not MERGED"
-say "merged #$PR_NUM"
-if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
-  git push --quiet origin --delete "$BR" && say "deleted $BR on origin"
+if [[ "$state" == MERGED ]]; then
+  say "merged #$PR_NUM"
+  if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+    git push --quiet origin --delete "$BR" && say "deleted $BR on origin"
+  fi
+elif ancestor "$TAGC" origin/develop; then
+  say "#$PR_NUM reads '$state', but $TAG has reached origin/develop by another route; #$PR_NUM and $BR are left for a person to close"
+else
+  die "#$PR_NUM reads '$state' after the merge, not MERGED"
 fi
 
 finish

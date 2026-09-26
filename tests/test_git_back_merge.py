@@ -27,16 +27,26 @@ Promote, bump, tag.
 
 ## After the release: the back-merge cascade (mandatory)
 
-Merge main into develop with --no-ff and push.
+Merge main into develop and push:
+
+    git -C ../<repo>-develop merge --no-ff main
 
 ## Development versioning
 
 Open the next cycle.
 """
 
+# releases.md as the design's handbook change leaves it: the cascade section
+# renamed and rewritten, and the transition section added.
 RELEASES_MD_TRANSITION = RELEASES_MD.replace(
+    "## After the release: the back-merge cascade (mandatory)\n\nMerge main into develop and push:\n\n"
+    "    git -C ../<repo>-develop merge --no-ff main\n",
+    "## After the release: the back-merge pull request\n\nRun git back-merge.\n",
+).replace(
     "## Development versioning",
-    "## The transition\n\nUntil the switch: the direct back-merge, then git dev-release --open.\n\n## Development versioning")
+    "## Until a repository has switched\n\nThe direct back-merge: git merge --no-ff main, then git dev-release --open."
+    "\n\n## Development versioning")
+RELEASES_MD_RENAMED_ONLY = RELEASES_MD_TRANSITION.split("## Until a repository has switched")[0] + "## Development versioning\n"
 
 
 class BackMergeCase(unittest.TestCase):
@@ -162,6 +172,17 @@ class HappyPaths(BackMergeCase):
     def test_unprotected_develop(self):
         self.make("pyproject")
         self.sb.update_gh_state(protection=None)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("develop's protection cannot be read", result.stdout)
+
+    def test_a_required_check_whose_name_holds_a_comma(self):
+        # a matrix job's check is named like "test (ubuntu-latest, 3.12)"
+        self.make("pyproject")
+        st = self.sb.gh_state()
+        st["protection"]["contexts"] = ["no-version-change", "test (ubuntu-latest, 3.12)"]
+        st["checks"]["result"] = {"no-version-change": "pass", "test (ubuntu-latest, 3.12)": "pass"}
+        self.sb.set_gh_state(st)
         self.assertOk(self.back_merge())
 
     def test_dry_run_changes_nothing(self):
@@ -233,8 +254,26 @@ class TheRelease(BackMergeCase):
         (self.handbook / "docs" / "releases.md").write_text(RELEASES_MD_TRANSITION)
         self.sb.update_gh_state(allow_merge_commit=False)
         result = self.back_merge()
-        self.assertRefused(result, "## The transition")
+        self.assertRefused(result, "## Until a repository has switched")
+        self.assertIn("git merge --no-ff main, then git dev-release --open", result.stderr)
         self.assertNotIn("After the release", result.stderr)
+        self.assertNotIn("Run git back-merge", result.stderr)
+
+    def test_not_switched_never_quotes_a_section_that_no_longer_gives_the_direct_back_merge(self):
+        self.make("pyproject")
+        (self.handbook / "docs" / "releases.md").write_text(RELEASES_MD_RENAMED_ONLY)
+        self.sb.update_gh_state(allow_merge_commit=False)
+        result = self.back_merge()
+        self.assertRefused(result, 'the section "Until a repository has switched"')
+        self.assertNotIn("Run git back-merge", result.stderr)
+
+    def test_an_unreadable_merge_setting_is_not_taken_for_not_switched(self):
+        # GitHub returns allow_merge_commit only to a caller with admin rights
+        self.make("pyproject")
+        self.sb.update_gh_state(admin=False)
+        result = self.back_merge()
+        self.assertRefused(result, "admin rights")
+        self.assertNotIn("does not allow merge commits", result.stderr)
 
 
 class Conflicts(BackMergeCase):
@@ -272,7 +311,7 @@ class Resumption(BackMergeCase):
         st["checks"]["result"]["test"] = "fail"
         self.sb.set_gh_state(st)
         first = self.back_merge()
-        self.assertRefused(first, "required checks failed: test")
+        self.assertRefused(first, "required checks failed: 'test'")
         st = self.sb.gh_state()
         self.assertEqual(st["prs"][0]["state"], "OPEN")
         head = self.origin("rev-parse", "back-merge-v0.1.1")
@@ -302,6 +341,63 @@ class Resumption(BackMergeCase):
         self.assertNotEqual(st["prs"][0]["mergedHead"], head)
         self.assertTrue(self.is_ancestor(self.repo.tag_commit, "develop"))
         self.assertEqual(self.origin("show", "develop:h.txt"), "feature H")
+
+    def test_a_head_updated_with_update_branch_is_rebuilt(self):
+        # the settled point on step 6: the head contains develop, and only the check tells
+        head = self.failing_first_run()
+        self.push_to_develop("h.txt", "feature H\n", "feat: feature H (#5)")
+        r = self.repo
+        r.g("fetch", "-q", "origin")
+        r.g("switch", "-q", "-C", "update-branch", "origin/back-merge-v0.1.1")
+        r.g("merge", "-q", "--no-ff", "origin/develop", "-m", "Merge branch 'develop' into back-merge-v0.1.1")
+        updated = r.g("rev-parse", "HEAD")
+        r.g("push", "-q", "origin", "HEAD:refs/heads/back-merge-v0.1.1")
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("is rebuilt from origin/develop", result.stdout)
+        self.assertIn("force-pushed", result.stdout)
+        self.assertNotIn(self.sb.gh_state()["prs"][0]["mergedHead"], (head, updated))
+        self.assertEqual(self.origin("show", "develop:h.txt"), "feature H")
+
+    def test_a_head_with_an_extra_commit_is_rebuilt(self):
+        self.failing_first_run()
+        r = self.repo
+        r.g("fetch", "-q", "origin")
+        r.g("switch", "-q", "-C", "extra", "origin/back-merge-v0.1.1")
+        ReleasedRepo.edit(r.releaser, "app.txt", "sneak\n")
+        r.g("commit", "-q", "-am", "fix: sneak")
+        extra = r.g("rev-parse", "HEAD")
+        r.g("push", "-q", "origin", "HEAD:refs/heads/back-merge-v0.1.1")
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("is rebuilt from origin/develop", result.stdout)
+        self.assertNotEqual(self.sb.gh_state()["prs"][0]["mergedHead"], extra)
+        self.assertNotEqual(self.origin("show", "develop:app.txt"), "sneak")
+
+    def test_merged_by_another_hand_while_the_checks_run(self):
+        self.make("pyproject")
+        st = self.sb.gh_state()
+        st["checks"]["merged_by_another_hand_on"] = 1
+        self.sb.set_gh_state(st)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("v0.1.1 has reached origin/develop while the checks ran", result.stdout)
+        self.assertNotIn("rebuilding", result.stdout)
+        st = self.sb.gh_state()
+        self.assertEqual([c for c in st["calls"] if c[:2] == ["pr", "merge"]], [])
+        self.assertEqual(st["prs"][0]["state"], "MERGED")
+        self.assertTrue(self.is_ancestor(self.repo.tag_commit, "develop"))
+        self.assertNoResidue()
+
+    def test_a_merge_that_gh_reports_as_failed_after_it_landed(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(merge_then_fail=True)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("gh reported a failure, but v0.1.1 has reached origin/develop", result.stdout)
+        self.assertNotIn("rebuilding", result.stdout)
+        self.assertEqual(self.sb.gh_state()["prs"][0]["state"], "MERGED")
+        self.assertNoResidue()
 
     def test_develop_moving_during_the_checks_rebuilds(self):
         self.make("pyproject")

@@ -13,6 +13,7 @@ dependency, a repository without a lockfile, tag names, and exit codes.
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from backmerge_support import ReleasedRepo, Sandbox, set_package_version, set_pyproject_version
@@ -222,7 +223,9 @@ class MainScenario(CheckCase):
         self.assertOutcome(ERROR, self.check(self.BASE, self.C, cwd=ci), "shallow repository")
 
     # further cases
-    def test_open_cycle_changing_a_dependency_line_in_the_lockfile(self):
+    def test_open_cycle_changing_a_dependency_line_by_another_value(self):
+        # refused as a line that changes more than the version value; LockfileOwner
+        # has the cases a dependency at main's own version brings
         wt = self.branch("x-lock-dep", self.M)
         set_pyproject_version(wt, "0.1.2.dev0", lock=True)
         lock = (wt / "uv.lock").read_text().replace('version = "3.10"', 'version = "3.11"')
@@ -302,13 +305,13 @@ class OtherKinds(CheckCase):
         r.set_version(r.releaser, "3.6.0-dev0")
         r.g("commit", "-q", "-am", "chore: open 3.6.0-dev0 dev cycle")
         self.assertOutcome(FAIL, self.check(base, "HEAD"), "is not main's next-patch placeholder 3.5.2-dev0")
-        # a lockfile line that belongs to a dependency
+        # a dependency line changed by another value (LockfileOwner has one at main's version)
         r.g("switch", "-q", "-c", "dep", m)
         set_package_version(r.releaser, "3.5.2-dev0")
         lock = (r.releaser / "package-lock.json").read_text().replace('"version": "1.3.0"', '"version": "1.3.1"')
         (r.releaser / "package-lock.json").write_text(lock)
         r.g("commit", "-q", "-am", "chore: open 3.5.2-dev0 dev cycle")
-        self.assertOutcome(FAIL, self.check(base, "HEAD"))
+        self.assertOutcome(FAIL, self.check(base, "HEAD"), "a line changes more than the version value")
 
     def test_version_txt(self):
         r, base, m = self.build("version-txt")
@@ -321,6 +324,54 @@ class OtherKinds(CheckCase):
         r.set_version(r.releaser, "0.24.0-dev")
         r.g("commit", "-q", "-am", "chore: open 0.24.0-dev dev cycle")
         self.assertOutcome(FAIL, self.check(base, "HEAD"))
+
+
+class LockfileOwner(CheckCase):
+    """A lockfile line may change only where it is the project's own.
+
+    A dependency named twin stands at the release's version, so that changing
+    its line from main's version to the placeholder passes every rule but this
+    one. In uv.lock the project's block carries no version, so that the rule on
+    a lockfile left behind does not refuse first.
+    """
+
+    def build(self, kind, **kw):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, kind, changelog=False, lock_twin=True, **kw)
+        r.g("fetch", "-q", "origin")
+        base = r.g("rev-parse", "origin/develop")
+        r.g("switch", "-q", "-c", "back-merge", "origin/develop")
+        r.g("merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop")
+        return r, base, r.g("rev-parse", "HEAD")
+
+    def test_package_lock_json(self):
+        r, base, m = self.build("package")
+        r.set_version(r.releaser, "3.5.2-dev0")
+        r.g("commit", "-q", "-am", "chore: open 3.5.2-dev0 dev cycle")
+        self.assertOutcome(PASS, self.check(base, "HEAD", tag="v3.5.1"))
+        # the top-level version and the twin's, with packages[""] left behind: two pairs
+        r.g("switch", "-q", "-c", "twin", m)
+        set_package_version(r.releaser, "3.5.2-dev0", lock=False)
+        lock = json.loads((r.releaser / "package-lock.json").read_text())
+        lock["version"] = "3.5.2-dev0"
+        lock["packages"]["node_modules/twin"]["version"] = "3.5.2-dev0"
+        (r.releaser / "package-lock.json").write_text(json.dumps(lock, indent=2) + "\n")
+        r.g("commit", "-q", "-am", "chore: open 3.5.2-dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD"), "is not the root package's version")
+
+    def test_uv_lock(self):
+        r, base, m = self.build("pyproject", lock_project_version=False)
+        set_pyproject_version(r.releaser, "0.1.2.dev0")
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(PASS, self.check(base, "HEAD", tag="v0.1.1"))
+        r.g("switch", "-q", "-c", "twin", m)
+        set_pyproject_version(r.releaser, "0.1.2.dev0")
+        lock = (r.releaser / "uv.lock").read_text()
+        self.assertEqual(lock.count('version = "0.1.1"'), 1)
+        (r.releaser / "uv.lock").write_text(lock.replace('version = "0.1.1"', 'version = "0.1.2.dev0"'))
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD"), "is not in the sim-app package block")
 
 
 class RealSizedLockfiles(CheckCase):
