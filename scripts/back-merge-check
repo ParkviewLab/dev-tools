@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# back-merge-check — verify that a back-merge pull request into develop brings
+# exactly the released state of main, and at most the open-cycle commit, and
+# nothing else.
+#
+#   back-merge-check <base> <head> [<main-ref>] [<tag>]
+#
+#   base      develop's commit the pull request is tested against. In a
+#             pull_request job, the first parent of the synthetic merge GitHub
+#             checks out (git rev-parse HEAD^1), which is the base tip GitHub
+#             merged against; github.event.pull_request.base.sha is not
+#             guaranteed to follow develop after the pull request is opened.
+#   head      the pull request's head commit, github.event.pull_request.head.sha;
+#             never HEAD, which is the synthetic merge, itself a merge commit
+#             that is not on main.
+#   main-ref  default origin/main; fetched with full history. Read from
+#             refs/remotes/<main-ref>, else refs/heads/<main-ref>, so that a tag
+#             of the same name cannot stand in for it; a name only a tag carries
+#             is refused.
+#   tag       the released tag the branch names (back-merge-<tag>), e.g. v1.2.3.
+#             Tag mode: every commit the merge brings from main must be in the
+#             tag or be that tag's changelog commit, `docs(changelog): <tag>
+#             [skip ci]`, which modifies or adds CHANGELOG.md alone, as a plain
+#             file (submodule ignore settings do not apply); and main's version must be
+#             the tag's. The version guard's back-merge mode always passes it.
+#
+# `git back-merge` runs this on its own branch before it pushes, and, in a
+# repository that has switched to merge commits, the version guard runs it in its
+# back-merge mode, checked out from dev-tools at a pinned release, so both apply
+# one rule. The conditions, all required:
+#
+#   1. The commits in base..head that are not reachable from main are exactly
+#      one merge commit M, optionally followed by one commit C that is the head
+#      and whose parent is M.
+#   2. M has two parents; M^1 is an ancestor of base; M^2 is an ancestor of main.
+#   3. The tree of M equals `git merge-tree --write-tree M^1 M^2`, and that
+#      automatic merge is clean; a hand-resolved merge is refused.
+#   4. The version at M equals main's. Without C, the head's version equals
+#      main's. C is admitted only where the version file is pyproject.toml or
+#      package.json; a repository whose version is in VERSION.txt skips the open
+#      cycle, so a C there is refused. With C, C changes only version lines, only
+#      in the version file and its lockfile (neither added, deleted nor changed in
+#      mode, and compared blob to blob), and only from main's version to the
+#      next-patch placeholder that dev-tools' _sot.sh computes for it
+#      (X.Y.(Z+1).dev0 for pyproject.toml, X.Y.(Z+1)-dev0 for package.json); a
+#      lockfile that records the project's version moves with it, and each line
+#      that changes is the project's own: the [project] table's version, the
+#      top-level version of package.json, and in a lockfile the project's entry,
+#      not a dependency's. Neither file may hold a NUL byte, and a submodule's
+#      ignore setting hides no change.
+#   5. In tag mode, as above.
+#   6. A shallow repository is refused outright.
+#
+# Versions are read from the committed trees, as the version guard reads them.
+# Exit 0 = pass, 1 = not a clean back-merge, 2 = usage or repository error.
+# Portable to bash 3.2 (macOS) and bash 5 (the ubuntu runners). See the
+# handbook's releases.md and ci.md.
+
+set -euo pipefail
+export LC_ALL=C   # byte-wise awk comparisons: macOS awk compares strings with strcoll
+
+usage() { echo "usage: back-merge-check <base> <head> [<main-ref>] [<tag>]"; }
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+if [ $# -lt 2 ] || [ $# -gt 4 ]; then usage >&2; exit 2; fi
+BASE_IN=$1; HEAD_IN=$2; MAIN_REF=${3:-origin/main}; TAG=${4:-}
+
+fail() { echo "FAIL: $*"; exit 1; }
+die()  { echo "ERROR: $*" >&2; exit 2; }
+ok()   { echo "  ok: $*"; }
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+[ "$(git rev-parse --is-shallow-repository)" = "false" ] \
+  || die "shallow repository: ancestry and merge-base answers are unreliable; fetch full history (and do not re-fetch develop with --depth=1)"
+if [ -n "$TAG" ]; then
+  echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail "'$TAG' is not a release tag vX.Y.Z"
+fi
+
+BASE=$(git rev-parse --verify --quiet "$BASE_IN^{commit}") || die "base $BASE_IN is not a commit"
+HEAD_SHA=$(git rev-parse --verify --quiet "$HEAD_IN^{commit}") || die "head $HEAD_IN is not a commit"
+# A bare name such as origin/main resolves through refs/tags before refs/remotes,
+# so a tag of that name would stand in for main. The remote-tracking branch, then
+# a local branch, is taken, and a name that only a tag carries is refused.
+resolve_main() {  # $1 = main-ref; prints the ref to read main from
+  local r
+  for r in "refs/remotes/$1" "refs/heads/$1"; do
+    if git rev-parse --verify --quiet "$r^{commit}" >/dev/null; then echo "$r"; return 0; fi
+  done
+  case "$(git rev-parse --symbolic-full-name "$1" 2>/dev/null || true)" in
+    refs/tags/*) return 1 ;;
+  esac
+  echo "$1"
+}
+MAIN_FULL=$(resolve_main "$MAIN_REF") || die "main ref $MAIN_REF names a tag, not a branch"
+MAIN=$(git rev-parse --verify --quiet "$MAIN_FULL^{commit}") || die "main ref $MAIN_REF not found"
+short() { git rev-parse --short "$1"; }
+
+# --- version reading, from committed trees, as the version guard reads them ---
+# The same reading as _sot.sh's sot_kind_at and sot_read_at, copied rather than
+# sourced: a workflow pin's floor rises only with a change to the pinned script's
+# own file (the handbook's ci.md), so every change to this check's behaviour must
+# be a change to this file.
+# Every reader in a pipeline here reads to the end of its input. One that stops
+# early (head -1, awk's exit, grep -q) can leave the writer, git show, to die of
+# SIGPIPE once more than a pipe buffer remains, as it does in a real lockfile;
+# under pipefail the pipeline then fails although its output was right.
+sot_kind_at() {  # $1 = commit; the precedence of dev-tools' _sot.sh
+  if   git cat-file -e "$1:pyproject.toml" 2>/dev/null; then echo pyproject
+  elif git cat-file -e "$1:package.json"   2>/dev/null; then echo package
+  elif git cat-file -e "$1:VERSION.txt"    2>/dev/null; then echo version-txt
+  else echo none; fi
+}
+version_at() {  # $1 = commit, $2 = kind; prints nothing where there is no version line
+  case "$2" in
+    pyproject)   git show "$1:pyproject.toml" | awk '!f && /^version *=/{print; f=1}' | sed -E "s/^version *= *[\"']([^\"']*)[\"'].*/\\1/" ;;
+    package)     git show "$1:package.json" | awk '!f && /"version" *:/{print; f=1}' | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+    version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
+  esac
+}
+version_file() {  # $1 = kind; a function, since bash 3.2 misparses a case inside $(...)
+  case "$1" in
+    pyproject) echo pyproject.toml ;;
+    package)   echo package.json ;;
+    *)         echo VERSION.txt ;;
+  esac
+}
+placeholder_for() {  # $1 = plain X.Y.Z release version, $2 = kind; as _sot.sh's sot_dev_version "$1" patch
+  local X Y Z
+  echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+  IFS=. read -r X Y Z <<EOF
+$1
+EOF
+  case "$2" in
+    pyproject) echo "$X.$Y.$((Z+1)).dev0" ;;
+    package)   echo "$X.$Y.$((Z+1))-dev0" ;;
+    *)         return 1 ;;
+  esac
+}
+
+echo "back-merge check: base $(short "$BASE"), head $(short "$HEAD_SHA"), main $(short "$MAIN")${TAG:+, tag $TAG}"
+
+# --- 1. what the pull request brings that main does not have ---
+OFF=$(git rev-list --topo-order "$HEAD_SHA" --not "$BASE" "$MAIN")
+N_OFF=$(printf '%s\n' "$OFF" | grep -c . || true)
+MERGES=""
+for c in $OFF; do
+  np=$(git rev-list --parents -n1 "$c" | awk '{print NF-1}')
+  [ "$np" -ge 2 ] && MERGES="$MERGES $c"
+done
+N_MERGES=$(echo $MERGES | wc -w | tr -d ' ')
+[ "$N_MERGES" = 1 ] || fail "expected exactly one merge commit not on main in base..head, found $N_MERGES (commits not on main: $N_OFF)"
+M=$(echo $MERGES)
+C=""
+if [ "$N_OFF" = 1 ]; then
+  [ "$M" = "$HEAD_SHA" ] || fail "the merge commit is not the head"
+elif [ "$N_OFF" = 2 ]; then
+  [ "$M" != "$HEAD_SHA" ] || fail "a second commit not on main sits below the merge"
+  C=$HEAD_SHA
+  [ "$(git rev-list --parents -n1 "$C" | awk '{print NF-1}')" = 1 ] || fail "the commit after the merge is not a single-parent commit"
+  [ "$(git rev-parse "$C^1")" = "$M" ] || fail "the commit after the merge does not follow it directly"
+else
+  fail "$N_OFF commits not on main in base..head; a back-merge brings one merge and at most one open-cycle commit"
+fi
+ok "commits not on main: merge $(short "$M")${C:+ and open-cycle commit $(short "$C")}"
+
+# --- 2. the merge's parents ---
+NP=$(git rev-list --parents -n1 "$M" | awk '{print NF-1}')
+[ "$NP" = 2 ] || fail "merge $(short "$M") has $NP parents, expected 2"
+P1=$(git rev-parse "$M^1"); P2=$(git rev-parse "$M^2")
+git merge-base --is-ancestor "$P1" "$BASE" || fail "first parent $(short "$P1") is not on develop (not an ancestor of base)"
+ok "first parent $(short "$P1") is an ancestor of base"
+git merge-base --is-ancestor "$P2" "$MAIN" || fail "second parent $(short "$P2") is not on main"
+ok "second parent $(short "$P2") is an ancestor of main"
+
+# --- 3. the merge is exactly the automatic merge of its parents ---
+set +e
+MT_OUT=$(git merge-tree --write-tree --no-messages "$P1" "$P2")
+MT_RC=$?
+set -e
+AUTO=${MT_OUT%%$'\n'*}
+[ "$MT_RC" = 0 ] || { [ "$MT_RC" = 1 ] && fail "the automatic merge of the parents conflicts: a hand-resolved back-merge needs a person's review"; die "git merge-tree failed ($MT_RC)"; }
+TREE=$(git rev-parse "$M^{tree}")
+[ "$AUTO" = "$TREE" ] || fail "tree of $(short "$M") differs from the automatic merge of its parents: $(git diff --stat "$AUTO" "$TREE" | tail -1)"
+ok "tree of the merge equals the automatic merge ($(git rev-parse --short "$TREE"))"
+
+# --- 5. tag mode: everything brought from main is released ---
+if [ -n "$TAG" ]; then
+  TAGC=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}") || fail "tag $TAG does not exist"
+  git merge-base --is-ancestor "$TAGC" "$P2" || fail "tag $TAG is not an ancestor of the merged main commit"
+  for c in $(git rev-list "$P2" --not "$TAGC"); do
+    s=$(git log -1 --format=%s "$c")
+    # the raw diff: one entry, CHANGELOG.md modified or added as a plain file
+    f=$(git diff-tree --no-commit-id -r --raw --no-abbrev --ignore-submodules=none "$c")
+    case "$f" in
+      *$'\n'*) f="" ;;
+      ":100644 100644 "*" M	CHANGELOG.md"|":000000 100644 "*" A	CHANGELOG.md") ;;
+      *) f="" ;;
+    esac
+    [ "$s" = "docs(changelog): $TAG [skip ci]" ] && [ -n "$f" ] \
+      || fail "commit $(short "$c") ('$s') was pushed to main after $TAG and is not its changelog commit"
+  done
+  ok "every commit brought from main is in $TAG or is its changelog commit"
+fi
+
+# --- 4. versions ---
+KIND=$(sot_kind_at "$HEAD_SHA")
+[ "$KIND" != none ] || die "no version file (pyproject.toml, package.json or VERSION.txt) at head"
+V_MAIN=$(version_at "$MAIN" "$KIND" || true); V_M=$(version_at "$M" "$KIND" || true); V_HEAD=$(version_at "$HEAD_SHA" "$KIND" || true)
+for pair in "main:$MAIN:$V_MAIN" "the merge:$M:$V_M" "head:$HEAD_SHA:$V_HEAD"; do
+  IFS=: read -r where commit v <<EOF
+$pair
+EOF
+  [ -n "$v" ] || fail "no version line in $where's $(version_file "$KIND") ($(short "$commit")); the check reads the first version line, as the version guard does"
+done
+if [ -n "$TAG" ]; then
+  [ "v$V_MAIN" = "$TAG" ] || fail "main's version $V_MAIN is not the tag's ($TAG)"
+fi
+[ "$V_M" = "$V_MAIN" ] || fail "version at the merge ($V_M) is not main's ($V_MAIN)"
+if [ -z "$C" ]; then
+  [ "$V_HEAD" = "$V_MAIN" ] || fail "head version $V_HEAD is not main's $V_MAIN"
+  ok "head version $V_HEAD equals main's"
+  echo "PASS"; exit 0
+fi
+
+[ "$KIND" != version-txt ] \
+  || fail "the open-cycle commit $(short "$C") is refused: a repository whose version is in VERSION.txt skips the open cycle, so its back-merge carries the merge alone"
+WANT=$(placeholder_for "$V_MAIN" "$KIND") || fail "main's version $V_MAIN is not a plain X.Y.Z release version"
+[ "$V_HEAD" = "$WANT" ] || fail "open-cycle version $V_HEAD is not main's next-patch placeholder $WANT"
+
+case "$KIND" in
+  pyproject) SOT=pyproject.toml; LOCK=uv.lock ;;
+  package)   SOT=package.json;   LOCK=package-lock.json ;;
+esac
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/back-merge-check.XXXXXX")
+trap 'rm -rf "$TMPD"' EXIT
+# the project's name, which owns its lines in uv.lock
+PROJ=""
+if [ "$KIND" = pyproject ]; then
+  # uv records the normalised name (PEP 503): lowercase, each run of - _ . as -
+  PROJ=$(git show "$C:pyproject.toml" | awk '!f && /^name *=/{print; f=1}' | sed -E "s/^name *= *[\"']([^\"']*)[\"'].*/\\1/" \
+         | tr 'A-Z' 'a-z' | sed -E 's/[-_.]+/-/g')
+fi
+# The open-cycle commit's changes are compared blob to blob, line by line: a
+# version change adds and removes no line, so the lines of the two blobs pair by
+# number, and no diff text is parsed, which a line beginning with --- or +++, a
+# diff driver or an unusual file name could make ambiguous.
+line_value() {  # $1 = a version line; prints its quoted value
+  printf '%s\n' "$1" | sed -E "s/^[[:space:]]*\"?version\"?[[:space:]]*[=:][[:space:]]*[\"']([^\"']*)[\"'].*/\\1/"
+}
+compare_blobs() {  # $1 = path, $2 = its blob at M, $3 = its blob at C
+  local f=$1 old="$TMPD/old" new="$TMPD/new" diffs n minus plus owner max pairs=0
+  git cat-file blob "$2" > "$old"
+  git cat-file blob "$3" > "$new"
+  [ "$(tr -d '\000' < "$old" | wc -c)" -eq "$(wc -c < "$old")" ] && [ "$(tr -d '\000' < "$new" | wc -c)" -eq "$(wc -c < "$new")" ] \
+    || fail "$f: a NUL byte in the file"
+  [ "$(tail -c1 "$old")" = "$(tail -c1 "$new")" ] || fail "$f: the open-cycle commit changes the last line ending"
+  diffs=$(awk 'FILENAME==ARGV[1]{a[FNR]=$0; na=FNR; next} {nb=FNR} FNR>na || (a[FNR] "") != ($0 "") {print FNR} END{if (nb+0!=na+0) print "count"}' "$old" "$new")
+  case "$diffs" in *count*) fail "$f: the open-cycle commit adds or removes lines" ;; esac
+  case "$f" in
+    package-lock.json) max=2 ;;
+    *) max=1 ;;
+  esac
+  for n in $diffs; do   # line numbers
+    pairs=$((pairs+1))
+    [ "$pairs" -le "$max" ] || fail "$f: more than $max version lines changed"
+    minus=$(awk -v n="$n" 'FNR==n{print; exit}' "$old")
+    plus=$(awk -v n="$n" 'FNR==n{print; exit}' "$new")
+    [ "${minus//"$V_MAIN"/$WANT}" = "$plus" ] || fail "$f: line $n changes more than the version value"   # unquoted replacement: bash 3.2 would keep the quotes
+    printf '%s\n' "$minus" | grep -E '^[[:space:]]*"?version"?[[:space:]]*[=:]' >/dev/null || fail "$f: line $n is not a version line"
+    [ "$(line_value "$minus")" = "$V_MAIN" ] && [ "$(line_value "$plus")" = "$WANT" ] \
+      || fail "$f: line $n does not change the version from $V_MAIN to $WANT"
+    [ "$f" != "$LOCK" ] || LOCK_DIFFS="$LOCK_DIFFS $n"
+    # a lockfile's changed line must be the project's own, not a dependency's
+    case "$f" in
+      pyproject.toml)
+        owner=$(awk -v n="$n" '{sub(/\r$/, "")} /^\[/{h=$0; sub(/[[:space:]]+$/, "", h)} FNR==n{print h; exit}' "$new")
+        [ "$owner" = "[project]" ] || fail "pyproject.toml: line $n is not the [project] table's version ($owner)" ;;
+      package.json)
+        owner=$(awk -v n="$n" 'FNR<n && /\{[[:space:]]*$/{k=$0; sub(/[[:space:]]+$/, "", k)} FNR==n{print k; exit}' "$new")
+        [ "$owner" = "{" ] || fail "package.json: line $n is not the top-level version ($owner)" ;;
+      uv.lock)
+        owner=$(awk -v n="$n" '{sub(/\r$/, "")} /^\[/{h=$0} /^name = "/{nm=$0} FNR==n{print h " " nm; exit}' "$new")
+        [ "$owner" = "[[package]] name = \"$PROJ\"" ] || fail "uv.lock: line $n is not in the $PROJ package block ($owner)" ;;
+      package-lock.json)
+        owner=$(awk -v n="$n" 'FNR<n && /\{[[:space:]]*$/{k=$0; sub(/[[:space:]]+$/, "", k)} FNR==n{print k; exit}' "$new")
+        case "$owner" in
+          '{'|*'"": {'*) ;;
+          *) fail "package-lock.json: line $n is not the root package's version ($owner)" ;;
+        esac ;;
+    esac
+  done
+  [ "$pairs" -ge 1 ] || fail "$f: no version line changed"
+}
+# The files it changes, from the raw diff read NUL-delimited, which neither word
+# splitting, globbing nor the quoting of an unusual name can alter.
+CHANGED=""; SOT_CHANGED=0; LOCK_DIFFS=""
+git diff --raw -z --no-abbrev --no-renames --ignore-submodules=none "$M" "$C" > "$TMPD/raw"
+while IFS= read -r -d '' meta && IFS= read -r -d '' f; do
+  IFS=' ' read -r om nm ob nb st <<EOF
+$meta
+EOF
+  case "$f" in
+    "$SOT"|"$LOCK") ;;
+    *) fail "the open-cycle commit changes $(printf '%q' "$f")" ;;
+  esac
+  [ "$st" = M ] || fail "the open-cycle commit adds or deletes $f"
+  [ "${om#:}" = "$nm" ] || fail "the open-cycle commit changes $f's mode (${om#:} -> $nm)"
+  [ "$f" != "$SOT" ] || SOT_CHANGED=1
+  CHANGED="$CHANGED $f"
+  compare_blobs "$f" "$ob" "$nb"
+done < "$TMPD/raw"
+[ "$SOT_CHANGED" = 1 ] || fail "the open-cycle commit does not change $SOT"
+# A lockfile that records the project's version must move with it: every line of
+# the project's own that holds main's version at M must be among those C changes
+# (in package-lock.json, the top-level version and packages[""]'s).
+project_version_lines() {  # $1 = the lockfile at M; prints those lines' numbers
+  case "$LOCK" in
+    uv.lock)
+      awk -v p="name = \"$PROJ\"" -v v="version = \"$V_MAIN\"" \
+        '{sub(/\r$/, "")} /^\[/{h=$0; own=0} h=="[[package]]" && $0==p {own=1} own && $0==v {print FNR}' "$1" ;;
+    package-lock.json)
+      awk -v v="\"version\": \"$V_MAIN\"" \
+        '(k=="{" || index(k, "\"\": {")) && index($0, v) {print FNR} /\{[[:space:]]*$/{k=$0; sub(/[[:space:]]+$/, "", k)}' "$1" ;;
+  esac
+}
+if git cat-file -e "$M:$LOCK" 2>/dev/null; then
+  git cat-file blob "$M:$LOCK" > "$TMPD/lock-at-m"
+  for L in $(project_version_lines "$TMPD/lock-at-m"); do
+    case "$LOCK_DIFFS " in
+      *" $L "*) ;;
+      *) fail "$LOCK still records $V_MAIN for the project at line $L; the open-cycle commit must update it with $SOT" ;;
+    esac
+  done
+fi
+ok "open-cycle commit $(short "$C") changes only the version, $V_MAIN -> $WANT (${CHANGED# })"
+echo "PASS"

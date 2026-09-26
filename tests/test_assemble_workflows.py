@@ -250,6 +250,85 @@ class CheckTests(Base):
         self.assertEqual(aw.job_regions("name: X\n\non:\n  push:\n"), [])
 
 
+PART_PIN = "b" * 40 + " # v1.3.0"
+OWN_PIN = "a" * 40 + " # v1.2.0"
+DEV_TOOLS_STEP = (
+    "      - uses: actions/checkout@v6\n"
+    "        with:\n"
+    "          repository: ParkviewLab/dev-tools\n"
+    f"          ref: {PART_PIN}\n"
+    "          path: dev-tools\n"
+)
+
+
+class PinTests(Base):
+    """A pin of a dev-tools release is the repository's own: judged by the pin rule, kept on re-assembly."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        final = self.hb / "templates/.github/workflows/release/changelog.yml"
+        final.write_text(final.read_text().replace("      - run: checkout\n", "      - run: checkout\n" + DEV_TOOLS_STEP))
+
+    def test_the_first_assembly_takes_the_parts_pin(self) -> None:
+        self.assemble('targets = ["pypi"]\n')
+        self.assertIn(f"ref: {PART_PIN}", self.release())
+
+    def test_check_prints_a_pin_equal_to_the_parts(self) -> None:
+        # equal to the part's, a pin can still be below its floor
+        self.assemble('targets = ["pypi"]\n')
+        status, out = self.check()
+        self.assertEqual(status, 0, out)
+        self.assertIn(f"release.yml: changelog: dev-tools pin {PART_PIN} (the part's); judged by the pin rule", out)
+        self.assertIn("release.yml: matches the assembly", out)
+
+    def test_check_leaves_a_pin_at_another_release_to_the_pin_rule(self) -> None:
+        self.assemble('targets = ["pypi"]\n')
+        self.tamper("release.yml", PART_PIN, OWN_PIN)
+        status, out = self.check()
+        self.assertEqual(status, 0, out)
+        self.assertIn(f"release.yml: changelog: dev-tools pin {OWN_PIN} (the part's: {PART_PIN})", out)
+        self.assertIn("matches the assembly, its dev-tools pins apart", out)
+
+    def test_check_still_reports_other_differences_beside_a_pin(self) -> None:
+        self.assemble('targets = ["pypi"]\n')
+        self.tamper("release.yml", PART_PIN, OWN_PIN)
+        self.tamper("release.yml", "run: pypi", "run: pypi --drifted")
+        status, out = self.check()
+        self.assertEqual(status, 1, out)
+        self.assertIn("release.yml: pypi: differs from its part, not declared", out)
+        self.assertIn("dev-tools pin " + OWN_PIN, out)
+        self.assertNotIn("changelog: differs from its part", out)
+
+    def test_the_assembly_keeps_the_repositorys_own_pin(self) -> None:
+        self.assemble('targets = ["pypi"]\n')
+        self.tamper("release.yml", PART_PIN, OWN_PIN)
+        status, out = self.assemble('targets = ["pypi"]\n')
+        self.assertEqual(status, 0, out)
+        self.assertIn(f"ref: {OWN_PIN}", self.release())
+        self.assertNotIn(PART_PIN, self.release())
+        self.assertIn(f"kept the repository's dev-tools pin {OWN_PIN}", out)
+        self.assertEqual(self.check()[0], 0)
+
+    def test_the_order_of_the_steps_keys_does_not_matter(self) -> None:
+        final = self.hb / "templates/.github/workflows/release/changelog.yml"
+        final.write_text(final.read_text().replace(
+            "          repository: ParkviewLab/dev-tools\n" + f"          ref: {PART_PIN}\n",
+            f"          ref: {PART_PIN}\n" + "          repository: ParkviewLab/dev-tools\n"))
+        self.assemble('targets = ["pypi"]\n')
+        self.tamper("release.yml", PART_PIN, OWN_PIN)
+        self.assertEqual(self.check()[0], 0)
+
+    def test_a_checkout_of_another_repository_is_compared_as_usual(self) -> None:
+        final = self.hb / "templates/.github/workflows/release/changelog.yml"
+        final.write_text(final.read_text().replace("ParkviewLab/dev-tools", "ParkviewLab/elsewhere"))
+        self.assemble('targets = ["pypi"]\n')
+        self.tamper("release.yml", PART_PIN, OWN_PIN)
+        status, out = self.check()
+        self.assertEqual(status, 1, out)
+        self.assertIn("release.yml: changelog: differs from its part, not declared", out)
+        self.assertNotIn("dev-tools pin", out)
+
+
 class DeclarationErrorTests(Base):
     def assert_declaration_error(self, declaration: str, message: str) -> None:
         status, output = self.assemble(declaration)
