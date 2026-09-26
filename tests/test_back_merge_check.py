@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The unit tests of scripts/back-merge-check.
 
-Every case of the simulation that stands behind the design (the proposal "Real
-merges and the back-merge pull request", its evidence `sim/run-sim.sh` and
-`sim/run-sim-kinds.sh`) is a test here, built in temporary repositories: 24 in the
-main scenario and 6 for package.json and VERSION.txt, with the VERSION.txt
-open-cycle commit now refused, as the design narrows condition 4. Further cases
-cover what the simulation did not construct: a lockfile line that belongs to a
-dependency, a repository without a lockfile, tag names, and exit codes.
+The cases of the simulation behind the design (the proposal "Real merges and the
+back-merge pull request", its sim/run-sim.sh and sim/run-sim-kinds.sh) are tests
+here, built in temporary repositories: 24 in the main scenario and 6 for
+package.json and VERSION.txt, a VERSION.txt open-cycle commit being refused, as
+condition 4 requires. Further cases cover what the simulation did not construct:
+a lockfile line that belongs to a dependency, a repository without a lockfile,
+real-sized lockfiles, names uv normalises, tag names, exit codes, condition 2 on
+its own, and attempts to pass other changes through the open-cycle commit or a
+tag that shadows main.
 """
 
 from __future__ import annotations

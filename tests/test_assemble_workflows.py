@@ -273,6 +273,14 @@ class PinTests(Base):
         self.assemble('targets = ["pypi"]\n')
         self.assertIn(f"ref: {PART_PIN}", self.release())
 
+    def test_check_prints_a_pin_equal_to_the_parts(self) -> None:
+        # equal to the part's, a pin can still be below its floor
+        self.assemble('targets = ["pypi"]\n')
+        status, out = self.check()
+        self.assertEqual(status, 0, out)
+        self.assertIn(f"release.yml: changelog: dev-tools pin {PART_PIN} (the part's); judged by the pin rule", out)
+        self.assertIn("release.yml: matches the assembly", out)
+
     def test_check_leaves_a_pin_at_another_release_to_the_pin_rule(self) -> None:
         self.assemble('targets = ["pypi"]\n')
         self.tamper("release.yml", PART_PIN, OWN_PIN)

@@ -6,21 +6,22 @@
 #
 # The last step of a release in a repository that merges pull requests with merge
 # commits: it brings the release on main back into develop through a pull request
-# that develop's protection and the version guard's back-merge mode examine, rather
-# than by a direct push. Run it from any worktree of the repository, under the
+# that develop's required checks examine (the version guard's back-merge mode among
+# them, in a repository that has switched), rather than by a direct push. Run it from any worktree of the repository, under the
 # release ask, which covers this command's merge of its own pull request and its
 # force push of its own back-merge-<tag> branch, and nothing else.
 #
 #   git back-merge             # the newest release tag vX.Y.Z
-#   git back-merge v1.2.3      # a named release tag
+#   git back-merge v1.2.3      # a named release tag, which must be main's version
 #   git back-merge --dry-run   # build and check locally; push, open and merge nothing
 #
 # In a temporary worktree it builds back-merge-<tag> from origin/develop with
 # `git merge --no-ff origin/main`, adds in a code repository the open-cycle commit
 # (the next-patch placeholder, X.Y.(Z+1).dev0 or X.Y.(Z+1)-dev0, written by _sot.sh),
 # checks the result with back-merge-check, pushes it, opens the pull request
-# labelled release-bookkeeping, waits for develop's required checks, and merges it
-# with --merge --match-head-commit, never --admin. Each step first tests whether it
+# labelled release-bookkeeping, closes any open back-merge pull request of an
+# older tag, waits for develop's required checks, and merges it with --merge
+# --match-head-commit, never --admin. Each step first tests whether it
 # has already been done, so a second run after an interruption resumes. A branch
 # that develop has moved beyond is rebuilt from the new develop, never updated with
 # GitHub's "Update branch". A repository that does not yet allow merge commits
@@ -222,7 +223,7 @@ if [[ "$WRITES_CHANGELOG" == 1 || "$REPAIRED" == 1 ]]; then
   subjects="$(git log --format=%s "$TAGC..origin/main")"
   if ! printf '%s\n' "$subjects" | grep -xF "$CHANGELOG_SUBJECT" >/dev/null; then
     if [[ "$DRY" == 1 ]]; then say "(dry run) '$CHANGELOG_SUBJECT' is not yet on origin/main"
-    else die "'$CHANGELOG_SUBJECT' is not on origin/main; the release's changelog job has not landed its commit"; fi
+    else die "'$CHANGELOG_SUBJECT' is not on origin/main; the release's changelog job has not landed its commit. If the job failed, repair the release as the handbook's releases.md gives it (\"Repairing a release whose changelog job failed\"), then run git back-merge again"; fi
   fi
 fi
 if [[ "$REPAIRED" == 1 ]]; then
@@ -319,7 +320,7 @@ refuse_version_conflict() {  # 7.
   ancestor "$p2" origin/develop || return 0
   v_promo="$(sot_read_at "$p2" "$KIND")"; v_dev="$(sot_read_at origin/develop "$KIND")"
   [[ "$v_promo" == "$v_dev" ]] && return 0
-  die "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop during the release, and the back-merge would conflict on the version line. Repair it as decision 6 (a) of the handbook's branching-why.md gives: one reviewed commit restoring develop's version lines (the version file and its lockfile) to $v_promo, pushed to develop directly (with enforce_admins switched off and on again where administrators are bound); then run git back-merge again."
+  die "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop during the release, and the back-merge would conflict on the version line. Repair it (decision 6 (a) of the real-merges design): one reviewed commit restoring develop's version lines (the version file and its lockfile) to $v_promo, pushed to develop directly (with enforce_admins switched off and on again where administrators are bound); then run git back-merge again."
 }
 build() {  # 8.
   local base files new
@@ -333,7 +334,7 @@ build() {  # 8.
     git -C "$WT" merge --abort >/dev/null 2>&1 || true
     drop_worktree
     [[ -n "$files" ]] || die "the merge of origin/main into origin/develop failed: $out"
-    die "the merge of origin/main into origin/develop conflicts in: $files. Repair it as decision 6 (d) gives: an ordinary pull request into develop that brings develop's side of each conflicting passage into agreement with main's; once it has merged, run git back-merge again. (A conflict on the version line is decision 6 (a).)"
+    die "the merge of origin/main into origin/develop conflicts in: $files. Repair it (decision 6 (d) of the real-merges design): an ordinary pull request into develop that brings develop's side of each conflicting passage into agreement with main's; once it has merged, run git back-merge again. (A conflict on the version line is decision 6 (a).)"
   fi
   if [[ "$KIND" != version-txt ]]; then
     new="$(cd "$WT" && sot_dev_version "$V_MAIN" patch)"

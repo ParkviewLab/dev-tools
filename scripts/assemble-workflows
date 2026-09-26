@@ -296,15 +296,19 @@ def keep_pins(wanted: str, existing: str) -> tuple[str, list[tuple[str, str, str
 
 
 def report_pins(name: str, current: str, wanted: str) -> None:
-    """A line for each pin that differs from the part's; the floor rule, not the check, judges it."""
+    """A line for each dev-tools pin in the file, equal to the part's or not: the pin
+    rule's floor, which the convention auditor and the release preflight apply, judges it."""
     wanted_pins = pins_by_job(wanted)
     for job, values in pins_by_job(current).items():
         for n, value in enumerate(values):
             part = wanted_pins.get(job, [])
-            if n < len(part) and part[n] == value:
-                continue
-            names = f" (the part's: {part[n]})" if n < len(part) else ""
-            print(f"{name}: {job}: dev-tools pin {value}{names}; judged by the pin rule, not by this check")
+            if n >= len(part):
+                note = ""
+            elif part[n] == value:
+                note = " (the part's)"
+            else:
+                note = f" (the part's: {part[n]})"
+            print(f"{name}: {job}: dev-tools pin {value}{note}; judged by the pin rule, not by this check")
 
 
 def differences(current: str, wanted: str) -> list[tuple[str, str]]:
@@ -326,10 +330,10 @@ def check(path: Path, wanted: str, slots: set[str]) -> int:
         print(f"{name}: missing; the assembly would create it")
         return 1
     current = path.read_text()
+    report_pins(name, current, wanted)
     if current == wanted:
         print(f"{name}: matches the assembly")
         return 0
-    report_pins(name, current, wanted)
     if mask_pins(current) == mask_pins(wanted):
         print(f"{name}: matches the assembly, its dev-tools pins apart")
         return 0

@@ -6,8 +6,10 @@ name: Test
 # changelog script imports the anthropic SDK only inside its Highlights call,
 # which its tests stub, so they need no package and no network. The tests of
 # back-merge-check, git-back-merge and git-dev-release build temporary git
-# repositories and run the scripts under the runner's bash 5 (bash 3.2 being
-# covered on macOS), with fakes of gh, uv and npm; they need git 2.38 or later
+# repositories and run the scripts under the runner's bash 5, with fakes of gh,
+# uv and npm. The scripts must also run under macOS's bash 3.2, which this
+# workflow does not run: the suite is run locally under /bin/bash on a Mac
+# before a release. The tests need git 2.38 or later
 # and jq, which the runner provides. The acceptance run in tests/acceptance/
 # needs the network and gh logged in to GitHub, and is not run here. See the
 # handbook's ci.md.

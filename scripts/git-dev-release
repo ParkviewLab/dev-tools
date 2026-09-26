@@ -16,12 +16,13 @@
 #     develop with that input and commits nothing;
 #   - where it does not, as in a repository that has not yet switched to merge
 #     commits, it sets the version file to the next dev version of the chosen
-#     target, commits, pushes develop and dispatches the workflow, as before.
+#     target, commits, pushes develop and dispatches the workflow.
 #
 #   git dev-release patch      # a dev build heading toward the next patch
 #   git dev-release minor      # ...toward the next minor (major likewise)
 #   git dev-release --open     # before the switch only: open the next cycle,
-#                              #   X.Y.(Z+1).dev0; no publish
+#                              #   X.Y.(Z+1).dev0, or X.Y.(Z+1)-dev0 for
+#                              #   package.json; no publish
 #   git dev-release --dry-run patch
 #
 # Once a repository allows merge commits, develop takes no direct push: the open
@@ -127,7 +128,7 @@ if [[ "$allowed" == true ]]; then
   if [[ "$OPEN" == 1 ]]; then
     echo "git dev-release: $slug allows merge commits, so develop takes no direct push: the open cycle arrives as the second commit of the back-merge pull request. After a release, run git back-merge." >&2
   else
-    echo "git dev-release: $slug allows merge commits, so develop takes no direct push, and its dev-release.yml on origin/develop declares no kind input: re-assemble it from the handbook's dev-release parts, whose gate takes the input, and run git dev-release again." >&2
+    echo "git dev-release: $slug allows merge commits, so develop takes no direct push, and its dev-release.yml on origin/develop declares no kind input: re-assemble it from the dev-release parts of a handbook release whose gate takes the kind input, and run git dev-release again." >&2
   fi
   exit 1
 fi

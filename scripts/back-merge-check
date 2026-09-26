@@ -24,11 +24,12 @@
 #             Tag mode: every commit the merge brings from main must be in the
 #             tag or be that tag's changelog commit, `docs(changelog): <tag>
 #             [skip ci]`, touching CHANGELOG.md only; and main's version must be
-#             the tag's. The version guard always passes it.
+#             the tag's. The version guard's back-merge mode always passes it.
 #
-# The version guard runs this in its back-merge mode, checked out from dev-tools
-# at a pinned release, and `git back-merge` runs it on its own branch before it
-# pushes, so both apply one rule. The conditions, all required:
+# `git back-merge` runs this on its own branch before it pushes, and, in a
+# repository that has switched to merge commits, the version guard runs it in its
+# back-merge mode, checked out from dev-tools at a pinned release, so both apply
+# one rule. The conditions, all required:
 #
 #   1. The commits in base..head that are not reachable from main are exactly
 #      one merge commit M, optionally followed by one commit C that is the head
