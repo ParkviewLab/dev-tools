@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# back-merge-check — verify that a back-merge pull request into develop brings
+# exactly the released state of main, and at most the open-cycle commit, and
+# nothing else.
+#
+#   back-merge-check <base> <head> [<main-ref>] [<tag>]
+#
+#   base      develop's commit the pull request is tested against. In a
+#             pull_request job, the first parent of the synthetic merge GitHub
+#             checks out (git rev-parse HEAD^1), which is the base tip GitHub
+#             merged against; github.event.pull_request.base.sha is not
+#             guaranteed to follow develop after the pull request is opened.
+#   head      the pull request's head commit, github.event.pull_request.head.sha;
+#             never HEAD, which is the synthetic merge, itself a merge commit
+#             that is not on main.
+#   main-ref  default origin/main; fetched with full history.
+#   tag       the released tag the branch names (back-merge-<tag>), e.g. v1.2.3.
+#             Tag mode: every commit the merge brings from main must be in the
+#             tag or be that tag's changelog commit, `docs(changelog): <tag>
+#             [skip ci]`, touching CHANGELOG.md only; and main's version must be
+#             the tag's. The version guard always passes it.
+#
+# The version guard runs this in its back-merge mode, checked out from dev-tools
+# at a pinned release, and `git back-merge` runs it on its own branch before it
+# pushes, so both apply one rule. The conditions, all required:
+#
+#   1. The commits in base..head that are not reachable from main are exactly
+#      one merge commit M, optionally followed by one commit C that is the head
+#      and whose parent is M.
+#   2. M has two parents; M^1 is an ancestor of base; M^2 is an ancestor of main.
+#   3. The tree of M equals `git merge-tree --write-tree M^1 M^2`, and that
+#      automatic merge is clean; a hand-resolved merge is refused.
+#   4. The version at M equals main's. Without C, the head's version equals
+#      main's. C is admitted only where the version file is pyproject.toml or
+#      package.json; a repository whose version is in VERSION.txt skips the open
+#      cycle, so a C there is refused. With C, C changes only version lines, only
+#      in the version file and its lockfile, and only from main's version to the
+#      next-patch placeholder that dev-tools' _sot.sh computes for it
+#      (X.Y.(Z+1).dev0 for pyproject.toml, X.Y.(Z+1)-dev0 for package.json); a
+#      lockfile that records the project's version moves with it, and the line
+#      that changes belongs to the project itself, not to a dependency.
+#   5. In tag mode, as above.
+#   6. A shallow repository is refused outright.
+#
+# Versions are read from the committed trees, as the version guard reads them.
+# Exit 0 = pass, 1 = not a clean back-merge, 2 = usage or repository error.
+# Portable to bash 3.2 (macOS) and bash 5 (the ubuntu runners). See the
+# handbook's releases.md and ci.md.
+
+set -euo pipefail
+
+usage() { echo "usage: back-merge-check <base> <head> [<main-ref>] [<tag>]"; }
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+if [ $# -lt 2 ] || [ $# -gt 4 ]; then usage >&2; exit 2; fi
+BASE_IN=$1; HEAD_IN=$2; MAIN_REF=${3:-origin/main}; TAG=${4:-}
+
+fail() { echo "FAIL: $*"; exit 1; }
+die()  { echo "ERROR: $*" >&2; exit 2; }
+ok()   { echo "  ok: $*"; }
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+[ "$(git rev-parse --is-shallow-repository)" = "false" ] \
+  || die "shallow repository: ancestry and merge-base answers are unreliable; fetch full history (and do not re-fetch develop with --depth=1)"
+if [ -n "$TAG" ]; then
+  echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail "'$TAG' is not a release tag vX.Y.Z"
+fi
+
+BASE=$(git rev-parse --verify --quiet "$BASE_IN^{commit}") || die "base $BASE_IN is not a commit"
+HEAD_SHA=$(git rev-parse --verify --quiet "$HEAD_IN^{commit}") || die "head $HEAD_IN is not a commit"
+MAIN=$(git rev-parse --verify --quiet "$MAIN_REF^{commit}") || die "main ref $MAIN_REF not found"
+short() { git rev-parse --short "$1"; }
+
+# --- version reading, from committed trees, as the version guard reads them ---
+sot_kind_at() {  # $1 = commit; the precedence of dev-tools' _sot.sh
+  if   git cat-file -e "$1:pyproject.toml" 2>/dev/null; then echo pyproject
+  elif git cat-file -e "$1:package.json"   2>/dev/null; then echo package
+  elif git cat-file -e "$1:VERSION.txt"    2>/dev/null; then echo version-txt
+  else echo none; fi
+}
+version_at() {  # $1 = commit, $2 = kind
+  case "$2" in
+    pyproject)   git show "$1:pyproject.toml" | grep -E '^version *= *"' | head -1 | sed -E 's/^version *= *"([^"]*)".*/\1/' ;;
+    package)     git show "$1:package.json" | grep -E '"version" *:' | head -1 | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+    version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
+  esac
+}
+placeholder_for() {  # $1 = plain X.Y.Z release version, $2 = kind; as _sot.sh's sot_dev_version "$1" patch
+  local X Y Z
+  echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+  IFS=. read -r X Y Z <<EOF
+$1
+EOF
+  case "$2" in
+    pyproject) echo "$X.$Y.$((Z+1)).dev0" ;;
+    package)   echo "$X.$Y.$((Z+1))-dev0" ;;
+    *)         return 1 ;;
+  esac
+}
+
+echo "back-merge check: base $(short "$BASE"), head $(short "$HEAD_SHA"), main $(short "$MAIN")${TAG:+, tag $TAG}"
+
+# --- 1. what the pull request brings that main does not have ---
+OFF=$(git rev-list --topo-order "$HEAD_SHA" --not "$BASE" "$MAIN")
+N_OFF=$(printf '%s\n' "$OFF" | grep -c . || true)
+MERGES=""
+for c in $OFF; do
+  np=$(git rev-list --parents -n1 "$c" | awk '{print NF-1}')
+  [ "$np" -ge 2 ] && MERGES="$MERGES $c"
+done
+N_MERGES=$(echo $MERGES | wc -w | tr -d ' ')
+[ "$N_MERGES" = 1 ] || fail "expected exactly one merge commit not on main in base..head, found $N_MERGES (commits not on main: $N_OFF)"
+M=$(echo $MERGES)
+C=""
+if [ "$N_OFF" = 1 ]; then
+  [ "$M" = "$HEAD_SHA" ] || fail "the merge commit is not the head"
+elif [ "$N_OFF" = 2 ]; then
+  [ "$M" != "$HEAD_SHA" ] || fail "a second commit not on main sits below the merge"
+  C=$HEAD_SHA
+  [ "$(git rev-list --parents -n1 "$C" | awk '{print NF-1}')" = 1 ] || fail "the commit after the merge is not a single-parent commit"
+  [ "$(git rev-parse "$C^1")" = "$M" ] || fail "the commit after the merge does not follow it directly"
+else
+  fail "$N_OFF commits not on main in base..head; a back-merge brings one merge and at most one open-cycle commit"
+fi
+ok "commits not on main: merge $(short "$M")${C:+ and open-cycle commit $(short "$C")}"
+
+# --- 2. the merge's parents ---
+NP=$(git rev-list --parents -n1 "$M" | awk '{print NF-1}')
+[ "$NP" = 2 ] || fail "merge $(short "$M") has $NP parents, expected 2"
+P1=$(git rev-parse "$M^1"); P2=$(git rev-parse "$M^2")
+git merge-base --is-ancestor "$P1" "$BASE" || fail "first parent $(short "$P1") is not on develop (not an ancestor of base)"
+ok "first parent $(short "$P1") is an ancestor of base"
+git merge-base --is-ancestor "$P2" "$MAIN" || fail "second parent $(short "$P2") is not on main"
+ok "second parent $(short "$P2") is an ancestor of main"
+
+# --- 3. the merge is exactly the automatic merge of its parents ---
+set +e
+MT_OUT=$(git merge-tree --write-tree --no-messages "$P1" "$P2")
+MT_RC=$?
+set -e
+AUTO=$(printf '%s\n' "$MT_OUT" | head -1)
+[ "$MT_RC" = 0 ] || { [ "$MT_RC" = 1 ] && fail "the automatic merge of the parents conflicts: a hand-resolved back-merge needs a person's review"; die "git merge-tree failed ($MT_RC)"; }
+TREE=$(git rev-parse "$M^{tree}")
+[ "$AUTO" = "$TREE" ] || fail "tree of $(short "$M") differs from the automatic merge of its parents: $(git diff --stat "$AUTO" "$TREE" | tail -1)"
+ok "tree of the merge equals the automatic merge ($(git rev-parse --short "$TREE"))"
+
+# --- 5. tag mode: everything brought from main is released ---
+if [ -n "$TAG" ]; then
+  TAGC=$(git rev-parse --verify --quiet "$TAG^{commit}") || fail "tag $TAG does not exist"
+  git merge-base --is-ancestor "$TAGC" "$P2" || fail "tag $TAG is not an ancestor of the merged main commit"
+  for c in $(git rev-list "$P2" --not "$TAGC"); do
+    s=$(git log -1 --format=%s "$c")
+    f=$(git diff-tree --no-commit-id --name-only -r "$c")
+    [ "$s" = "docs(changelog): $TAG [skip ci]" ] && [ "$f" = "CHANGELOG.md" ] \
+      || fail "commit $(short "$c") ('$s') was pushed to main after $TAG and is not its changelog commit"
+  done
+  ok "every commit brought from main is in $TAG or is its changelog commit"
+fi
+
+# --- 4. versions ---
+KIND=$(sot_kind_at "$HEAD_SHA")
+[ "$KIND" != none ] || die "no version file (pyproject.toml, package.json or VERSION.txt) at head"
+V_MAIN=$(version_at "$MAIN" "$KIND"); V_M=$(version_at "$M" "$KIND"); V_HEAD=$(version_at "$HEAD_SHA" "$KIND")
+if [ -n "$TAG" ]; then
+  [ "v$V_MAIN" = "$TAG" ] || fail "main's version $V_MAIN is not the tag's ($TAG)"
+fi
+[ "$V_M" = "$V_MAIN" ] || fail "version at the merge ($V_M) is not main's ($V_MAIN)"
+if [ -z "$C" ]; then
+  [ "$V_HEAD" = "$V_MAIN" ] || fail "head version $V_HEAD is not main's $V_MAIN"
+  ok "head version $V_HEAD equals main's"
+  echo "PASS"; exit 0
+fi
+
+[ "$KIND" != version-txt ] \
+  || fail "the open-cycle commit $(short "$C") is refused: a repository whose version is in VERSION.txt skips the open cycle, so its back-merge carries the merge alone"
+WANT=$(placeholder_for "$V_MAIN" "$KIND") || fail "main's version $V_MAIN is not a plain X.Y.Z release version"
+[ "$V_HEAD" = "$WANT" ] || fail "open-cycle version $V_HEAD is not main's next-patch placeholder $WANT"
+
+case "$KIND" in
+  pyproject) SOT=pyproject.toml; LOCK=uv.lock ;;
+  package)   SOT=package.json;   LOCK=package-lock.json ;;
+esac
+CHANGED=$(git diff --no-renames --name-only "$M" "$C")
+printf '%s\n' "$CHANGED" | grep -qxF "$SOT" || fail "the open-cycle commit does not change $SOT"
+# a lockfile that records the project's version must move with it
+lock_version_at() {  # $1 = commit; prints the project's own version in the lockfile, if any
+  local proj
+  case "$LOCK" in
+    uv.lock)
+      git cat-file -e "$1:uv.lock" 2>/dev/null || return 0
+      proj=$(git show "$1:pyproject.toml" | grep -E '^name *= *"' | head -1 | sed -E 's/^name *= *"([^"]*)".*/\1/')
+      git show "$1:uv.lock" | awk -v p="name = \"$proj\"" '$0==p{f=1; next} f && /^version = "/{gsub(/^version = "|"$/,""); print; exit} /^\[\[package\]\]/{f=0}' ;;
+    package-lock.json)
+      git cat-file -e "$1:package-lock.json" 2>/dev/null || return 0
+      git show "$1:package-lock.json" | grep -E '"version" *:' | head -1 | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+  esac
+}
+if [ "$(lock_version_at "$M")" = "$V_MAIN" ]; then
+  [ "$(lock_version_at "$C")" = "$WANT" ] || fail "$LOCK still records $(lock_version_at "$C") for the project; the open-cycle commit must update it with $SOT"
+fi
+for f in $CHANGED; do
+  [ "$f" = "$SOT" ] || [ "$f" = "$LOCK" ] || fail "the open-cycle commit changes $f"
+  # every changed line must be a version line whose only change is V_MAIN -> WANT
+  pairs=0; minus=""; lines=""
+  while IFS= read -r l; do
+    case "$l" in
+      '@@'*) lines="$lines $(echo "$l" | sed -E 's/^@@ -[0-9,]+ \+([0-9]+).*/\1/')" ;;
+      '---'*|'+++'*) ;;
+      -*) [ -z "$minus" ] || fail "$f: unpaired removal"; minus=${l#-} ;;
+      +*) plus=${l#+}
+          [ -n "$minus" ] || fail "$f: an added line with no removed line"
+          expect=${minus//"$V_MAIN"/$WANT}   # unquoted replacement: bash 3.2 would keep the quotes
+          [ "$expect" = "$plus" ] || fail "$f: a line changes more than the version value"
+          echo "$minus" | grep -Eq '^[[:space:]]*"?version"?[[:space:]]*[=:]' || fail "$f: a changed line is not a version line"
+          minus=""; pairs=$((pairs+1)) ;;
+    esac
+  done <<EOF
+$(git diff --no-color --no-renames -U0 "$M" "$C" -- "$f")
+EOF
+  [ -z "$minus" ] || fail "$f: unpaired removal"
+  case "$f" in
+    package-lock.json) max=2 ;;
+    *) max=1 ;;
+  esac
+  [ "$pairs" -ge 1 ] && [ "$pairs" -le "$max" ] || fail "$f: $pairs version lines changed, expected 1..$max"
+  # lockfiles: the changed lines must belong to the project itself
+  for n in $lines; do
+    case "$f" in
+      uv.lock)
+        proj=$(git show "$C:pyproject.toml" | grep -E '^name *= *"' | head -1 | sed -E 's/^name *= *"([^"]*)".*/\1/')
+        owner=$(git show "$C:uv.lock" | awk -v n="$n" 'NR<n && /^name = "/{nm=$0} NR==n{print nm; exit}')
+        [ "$owner" = "name = \"$proj\"" ] || fail "uv.lock: line $n is not in the $proj package block ($owner)" ;;
+      package-lock.json)
+        owner=$(git show "$C:package-lock.json" | awk -v n="$n" 'NR<n && /\{[[:space:]]*$/{k=$0} NR==n{print k; exit}')
+        case "$owner" in
+          '{'|*'"": {'*) ;;
+          *) fail "package-lock.json: line $n is not the root package's version ($owner)" ;;
+        esac ;;
+    esac
+  done
+done
+ok "open-cycle commit $(short "$C") changes only the version, $V_MAIN -> $WANT ($(echo $CHANGED))"
+echo "PASS"

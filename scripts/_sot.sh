@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # _sot.sh — version Source-of-Truth helpers for the ParkviewLab git-* release scripts.
-# Sourced (not run) by git-bump, git-release, git-dev-release. NOT executable, so
-# install.sh does not symlink it as a `git-` command.
+# Sourced (not run) by git-bump, git-release, git-dev-release, git-back-merge. NOT
+# executable, so install.sh does not symlink it as a `git-` command.
 #
 # Three SoT shapes, auto-detected: pyproject.toml ([project].version), package.json
 # (version), and a top-level VERSION.txt. See the handbook's releases.md.
@@ -26,6 +26,26 @@ sot_read() {  # echoes the current version
     pyproject)   uv run --quiet python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])' ;;
     package)     node -p "require('./package.json').version" 2>/dev/null || python3 -c 'import json;print(json.load(open("package.json"))["version"])' ;;
     version-txt) tr -d '[:space:]' < VERSION.txt ;;
+  esac
+}
+
+# --- detection and read at a commit ------------------------------------------
+# From a committed tree rather than the working tree, read as the version guard
+# reads it (the first `version` line), so that git-back-merge can read origin/main
+# and origin/develop without checking them out. back-merge-check carries its own
+# copy, so that the guard can run it alone.
+sot_kind_at() {  # $1 = commit; echoes pyproject | package | version-txt | none
+  if   git cat-file -e "$1:pyproject.toml" 2>/dev/null; then echo pyproject
+  elif git cat-file -e "$1:package.json"   2>/dev/null; then echo package
+  elif git cat-file -e "$1:VERSION.txt"    2>/dev/null; then echo version-txt
+  else echo none; fi
+}
+
+sot_read_at() {  # $1 = commit, $2 = kind (from sot_kind_at); echoes the version there
+  case "$2" in
+    pyproject)   git show "$1:pyproject.toml" | grep -E '^version *= *"' | head -1 | sed -E 's/^version *= *"([^"]*)".*/\1/' ;;
+    package)     git show "$1:package.json" | grep -E '"version" *:' | head -1 | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+    version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
   esac
 }
 
