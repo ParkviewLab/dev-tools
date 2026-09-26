@@ -16,7 +16,10 @@
 #   head      the pull request's head commit, github.event.pull_request.head.sha;
 #             never HEAD, which is the synthetic merge, itself a merge commit
 #             that is not on main.
-#   main-ref  default origin/main; fetched with full history.
+#   main-ref  default origin/main; fetched with full history. Read from
+#             refs/remotes/<main-ref>, else refs/heads/<main-ref>, so that a tag
+#             of the same name cannot stand in for it; a name only a tag carries
+#             is refused.
 #   tag       the released tag the branch names (back-merge-<tag>), e.g. v1.2.3.
 #             Tag mode: every commit the merge brings from main must be in the
 #             tag or be that tag's changelog commit, `docs(changelog): <tag>
@@ -37,7 +40,8 @@
 #      main's. C is admitted only where the version file is pyproject.toml or
 #      package.json; a repository whose version is in VERSION.txt skips the open
 #      cycle, so a C there is refused. With C, C changes only version lines, only
-#      in the version file and its lockfile, and only from main's version to the
+#      in the version file and its lockfile (neither added, deleted nor changed in
+#      mode, and compared blob to blob), and only from main's version to the
 #      next-patch placeholder that dev-tools' _sot.sh computes for it
 #      (X.Y.(Z+1).dev0 for pyproject.toml, X.Y.(Z+1)-dev0 for package.json); a
 #      lockfile that records the project's version moves with it, and the line
@@ -70,7 +74,21 @@ fi
 
 BASE=$(git rev-parse --verify --quiet "$BASE_IN^{commit}") || die "base $BASE_IN is not a commit"
 HEAD_SHA=$(git rev-parse --verify --quiet "$HEAD_IN^{commit}") || die "head $HEAD_IN is not a commit"
-MAIN=$(git rev-parse --verify --quiet "$MAIN_REF^{commit}") || die "main ref $MAIN_REF not found"
+# A bare name such as origin/main resolves through refs/tags before refs/remotes,
+# so a tag of that name would stand in for main. The remote-tracking branch, then
+# a local branch, is taken, and a name that only a tag carries is refused.
+resolve_main() {  # $1 = main-ref; prints the ref to read main from
+  local r
+  for r in "refs/remotes/$1" "refs/heads/$1"; do
+    if git rev-parse --verify --quiet "$r^{commit}" >/dev/null; then echo "$r"; return 0; fi
+  done
+  case "$(git rev-parse --symbolic-full-name "$1" 2>/dev/null || true)" in
+    refs/tags/*) return 1 ;;
+  esac
+  echo "$1"
+}
+MAIN_FULL=$(resolve_main "$MAIN_REF") || die "main ref $MAIN_REF names a tag, not a branch"
+MAIN=$(git rev-parse --verify --quiet "$MAIN_FULL^{commit}") || die "main ref $MAIN_REF not found"
 short() { git rev-parse --short "$1"; }
 
 # --- version reading, from committed trees, as the version guard reads them ---
@@ -152,7 +170,7 @@ ok "tree of the merge equals the automatic merge ($(git rev-parse --short "$TREE
 
 # --- 5. tag mode: everything brought from main is released ---
 if [ -n "$TAG" ]; then
-  TAGC=$(git rev-parse --verify --quiet "$TAG^{commit}") || fail "tag $TAG does not exist"
+  TAGC=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}") || fail "tag $TAG does not exist"
   git merge-base --is-ancestor "$TAGC" "$P2" || fail "tag $TAG is not an ancestor of the merged main commit"
   for c in $(git rev-list "$P2" --not "$TAGC"); do
     s=$(git log -1 --format=%s "$c")
@@ -186,16 +204,75 @@ case "$KIND" in
   pyproject) SOT=pyproject.toml; LOCK=uv.lock ;;
   package)   SOT=package.json;   LOCK=package-lock.json ;;
 esac
-CHANGED=$(git diff --no-renames --name-only "$M" "$C")
-printf '%s\n' "$CHANGED" | grep -xF "$SOT" >/dev/null || fail "the open-cycle commit does not change $SOT"
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/back-merge-check.XXXXXX")
+trap 'rm -rf "$TMPD"' EXIT
+# the project's name, which owns its lines in uv.lock
+PROJ=""
+if [ "$KIND" = pyproject ]; then
+  PROJ=$(git show "$C:pyproject.toml" | awk '!f && /^name *= *"/{print; f=1}' | sed -E 's/^name *= *"([^"]*)".*/\1/')
+fi
+# The open-cycle commit's changes are compared blob to blob, line by line: a
+# version change adds and removes no line, so the lines of the two blobs pair by
+# number, and no diff text is parsed, which a line beginning with --- or +++, a
+# diff driver or an unusual file name could make ambiguous.
+compare_blobs() {  # $1 = path, $2 = its blob at M, $3 = its blob at C
+  local f=$1 old="$TMPD/old" new="$TMPD/new" diffs n minus plus owner max pairs=0
+  git cat-file blob "$2" > "$old"
+  git cat-file blob "$3" > "$new"
+  [ "$(tail -c1 "$old")" = "$(tail -c1 "$new")" ] || fail "$f: the open-cycle commit changes the last line ending"
+  diffs=$(awk 'FILENAME==ARGV[1]{a[FNR]=$0; na=FNR; next} {nb=FNR} FNR>na || a[FNR]!=$0 {print FNR} END{if (nb+0!=na+0) print "count"}' "$old" "$new")
+  case "$diffs" in *count*) fail "$f: the open-cycle commit adds or removes lines" ;; esac
+  case "$f" in
+    package-lock.json) max=2 ;;
+    *) max=1 ;;
+  esac
+  for n in $diffs; do   # line numbers
+    pairs=$((pairs+1))
+    [ "$pairs" -le "$max" ] || fail "$f: more than $max version lines changed"
+    minus=$(awk -v n="$n" 'FNR==n{print; exit}' "$old")
+    plus=$(awk -v n="$n" 'FNR==n{print; exit}' "$new")
+    [ "${minus//"$V_MAIN"/$WANT}" = "$plus" ] || fail "$f: line $n changes more than the version value"   # unquoted replacement: bash 3.2 would keep the quotes
+    printf '%s\n' "$minus" | grep -E '^[[:space:]]*"?version"?[[:space:]]*[=:]' >/dev/null || fail "$f: line $n is not a version line"
+    # a lockfile's changed line must be the project's own, not a dependency's
+    case "$f" in
+      uv.lock)
+        owner=$(awk -v n="$n" '/^\[/{h=$0} /^name = "/{nm=$0} FNR==n{print h " " nm; exit}' "$new")
+        [ "$owner" = "[[package]] name = \"$PROJ\"" ] || fail "uv.lock: line $n is not in the $PROJ package block ($owner)" ;;
+      package-lock.json)
+        owner=$(awk -v n="$n" 'FNR<n && /\{[[:space:]]*$/{k=$0} FNR==n{print k; exit}' "$new")
+        case "$owner" in
+          '{'|*'"": {'*) ;;
+          *) fail "package-lock.json: line $n is not the root package's version ($owner)" ;;
+        esac ;;
+    esac
+  done
+  [ "$pairs" -ge 1 ] || fail "$f: no version line changed"
+}
+# The files it changes, from the raw diff read NUL-delimited, which neither word
+# splitting, globbing nor the quoting of an unusual name can alter.
+CHANGED=""; SOT_CHANGED=0
+git diff --raw -z --no-abbrev --no-renames "$M" "$C" > "$TMPD/raw"
+while IFS= read -r -d '' meta && IFS= read -r -d '' f; do
+  IFS=' ' read -r om nm ob nb st <<EOF
+$meta
+EOF
+  case "$f" in
+    "$SOT"|"$LOCK") ;;
+    *) fail "the open-cycle commit changes $(printf '%q' "$f")" ;;
+  esac
+  [ "$st" = M ] || fail "the open-cycle commit adds or deletes $f"
+  [ "${om#:}" = "$nm" ] || fail "the open-cycle commit changes $f's mode (${om#:} -> $nm)"
+  [ "$f" != "$SOT" ] || SOT_CHANGED=1
+  CHANGED="$CHANGED $f"
+  compare_blobs "$f" "$ob" "$nb"
+done < "$TMPD/raw"
+[ "$SOT_CHANGED" = 1 ] || fail "the open-cycle commit does not change $SOT"
 # a lockfile that records the project's version must move with it
 lock_version_at() {  # $1 = commit; prints the project's own version in the lockfile, if any
-  local proj
   case "$LOCK" in
     uv.lock)
       git cat-file -e "$1:uv.lock" 2>/dev/null || return 0
-      proj=$(git show "$1:pyproject.toml" | awk '!f && /^name *= *"/{print; f=1}' | sed -E 's/^name *= *"([^"]*)".*/\1/')
-      git show "$1:uv.lock" | awk -v p="name = \"$proj\"" '$0==p{f=1; next} f && !d && /^version = "/{gsub(/^version = "|"$/,""); print; d=1} /^\[\[package\]\]/{f=0}' ;;
+      git show "$1:uv.lock" | awk -v p="name = \"$PROJ\"" '$0==p{f=1; next} f && !d && /^version = "/{gsub(/^version = "|"$/,""); print; d=1} /^\[\[package\]\]/{f=0}' ;;
     package-lock.json)
       git cat-file -e "$1:package-lock.json" 2>/dev/null || return 0
       git show "$1:package-lock.json" | awk '!f && /"version" *:/{print; f=1}' | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
@@ -204,46 +281,5 @@ lock_version_at() {  # $1 = commit; prints the project's own version in the lock
 if [ "$(lock_version_at "$M")" = "$V_MAIN" ]; then
   [ "$(lock_version_at "$C")" = "$WANT" ] || fail "$LOCK still records $(lock_version_at "$C") for the project; the open-cycle commit must update it with $SOT"
 fi
-for f in $CHANGED; do
-  [ "$f" = "$SOT" ] || [ "$f" = "$LOCK" ] || fail "the open-cycle commit changes $f"
-  # every changed line must be a version line whose only change is V_MAIN -> WANT
-  pairs=0; minus=""; lines=""
-  while IFS= read -r l; do
-    case "$l" in
-      '@@'*) lines="$lines $(echo "$l" | sed -E 's/^@@ -[0-9,]+ \+([0-9]+).*/\1/')" ;;
-      '---'*|'+++'*) ;;
-      -*) [ -z "$minus" ] || fail "$f: unpaired removal"; minus=${l#-} ;;
-      +*) plus=${l#+}
-          [ -n "$minus" ] || fail "$f: an added line with no removed line"
-          expect=${minus//"$V_MAIN"/$WANT}   # unquoted replacement: bash 3.2 would keep the quotes
-          [ "$expect" = "$plus" ] || fail "$f: a line changes more than the version value"
-          echo "$minus" | grep -Eq '^[[:space:]]*"?version"?[[:space:]]*[=:]' || fail "$f: a changed line is not a version line"
-          minus=""; pairs=$((pairs+1)) ;;
-    esac
-  done <<EOF
-$(git diff --no-color --no-renames -U0 "$M" "$C" -- "$f")
-EOF
-  [ -z "$minus" ] || fail "$f: unpaired removal"
-  case "$f" in
-    package-lock.json) max=2 ;;
-    *) max=1 ;;
-  esac
-  [ "$pairs" -ge 1 ] && [ "$pairs" -le "$max" ] || fail "$f: $pairs version lines changed, expected 1..$max"
-  # lockfiles: the changed lines must belong to the project itself
-  for n in $lines; do
-    case "$f" in
-      uv.lock)
-        proj=$(git show "$C:pyproject.toml" | awk '!f && /^name *= *"/{print; f=1}' | sed -E 's/^name *= *"([^"]*)".*/\1/')
-        owner=$(git show "$C:uv.lock" | awk -v n="$n" 'NR<n && /^name = "/{nm=$0} NR==n{print nm}')
-        [ "$owner" = "name = \"$proj\"" ] || fail "uv.lock: line $n is not in the $proj package block ($owner)" ;;
-      package-lock.json)
-        owner=$(git show "$C:package-lock.json" | awk -v n="$n" 'NR<n && /\{[[:space:]]*$/{k=$0} NR==n{print k}')
-        case "$owner" in
-          '{'|*'"": {'*) ;;
-          *) fail "package-lock.json: line $n is not the root package's version ($owner)" ;;
-        esac ;;
-    esac
-  done
-done
-ok "open-cycle commit $(short "$C") changes only the version, $V_MAIN -> $WANT ($(echo $CHANGED))"
+ok "open-cycle commit $(short "$C") changes only the version, $V_MAIN -> $WANT (${CHANGED# })"
 echo "PASS"

@@ -227,10 +227,73 @@ class MainScenario(CheckCase):
         # refused as a line that changes more than the version value; LockfileOwner
         # has the cases a dependency at main's own version brings
         wt = self.branch("x-lock-dep", self.M)
-        set_pyproject_version(wt, "0.1.2.dev0", lock=True)
+        set_pyproject_version(wt, "0.1.2.dev0", lock=False)
         lock = (wt / "uv.lock").read_text().replace('version = "3.10"', 'version = "3.11"')
         (wt / "uv.lock").write_text(lock)
-        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_all("chore: open 0.1.2.dev0 dev cycle")))
+        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_all("chore: open 0.1.2.dev0 dev cycle")),
+                           "changes more than the version value")
+
+    # attempts on the open-cycle rule and on the main ref (the adversarial review)
+    def open_cycle_on_m(self, name):
+        wt = self.branch(name, self.M)
+        self.repo.set_version(wt, "0.1.2.dev0")
+        return wt
+
+    def commit_everything(self, msg="chore: open 0.1.2.dev0 dev cycle"):
+        self.repo.g("add", "-A")
+        self.repo.g("commit", "-q", "-m", msg)
+        return self.repo.g("rev-parse", "HEAD")
+
+    def test_open_cycle_adding_a_file_whose_name_holds_a_space(self):
+        wt = self.open_cycle_on_m("x-space")
+        (wt / "pyproject.toml pyproject.toml").write_text("injected\n")
+        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_everything(), tag="v0.1.1"),
+                           "changes pyproject.toml\\ pyproject.toml")
+
+    def test_open_cycle_adding_a_file_whose_name_is_a_glob(self):
+        wt = self.open_cycle_on_m("x-glob")
+        (wt / "pyproject.to[m]l").write_text("injected\n")
+        (wt / "[u]v.lock").write_text("injected\n")
+        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_everything(), tag="v0.1.1"),
+                           "the open-cycle commit changes")
+
+    def test_open_cycle_adding_a_line_that_begins_with_plus_signs(self):
+        # in a -U0 diff it reads "+++...", the form of a file header
+        wt = self.open_cycle_on_m("x-plusplus")
+        with open(wt / "pyproject.toml", "a") as fh:
+            fh.write("++injected\n")
+        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_everything(), tag="v0.1.1"),
+                           "adds or removes lines")
+
+    def test_open_cycle_changing_the_version_files_mode(self):
+        wt = self.open_cycle_on_m("x-mode")
+        (wt / "pyproject.toml").chmod(0o755)
+        head = self.commit_everything()
+        self.assertEqual(self.repo.g("ls-tree", head, "pyproject.toml").split()[0], "100755")
+        self.assertOutcome(FAIL, self.check(self.BASE, head, tag="v0.1.1"), "mode")
+
+    def test_open_cycle_changing_the_last_line_ending(self):
+        wt = self.open_cycle_on_m("x-eol")
+        (wt / "pyproject.toml").write_text((wt / "pyproject.toml").read_text().rstrip("\n"))
+        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_everything(), tag="v0.1.1"),
+                           "last line ending")
+
+    def test_a_tag_named_like_main_does_not_stand_in_for_it(self):
+        g = self.repo.g
+        wt = self.branch("x-fake-main", self.MAINTIP)
+        ReleasedRepo.edit(wt, "CHANGELOG.md", "# Changelog\n\nfabricated\n")
+        fake = self.commit_all("docs(changelog): v0.1.1 [skip ci]")
+        g("tag", "origin/main", fake)
+        self.addCleanup(g, "tag", "-d", "origin/main")
+        g("switch", "-q", "-C", "x-fake-merge", self.BASE)
+        g("merge", "-q", "--no-ff", fake, "-m", "Back-merge: main → develop after v0.1.1")
+        self.assertOutcome(FAIL, self.check(self.BASE, "HEAD", tag="v0.1.1"), "not on main")
+
+    def test_a_main_ref_that_only_a_tag_carries_is_refused(self):
+        g = self.repo.g
+        g("tag", "only-a-tag", self.MAINTIP)
+        self.addCleanup(g, "tag", "-d", "only-a-tag")
+        self.assertOutcome(ERROR, self.check(self.BASE, self.C, main="only-a-tag"), "names a tag")
 
     def test_two_merges_refused(self):
         wt = self.branch("x-side", self.BASE)
@@ -307,11 +370,11 @@ class OtherKinds(CheckCase):
         self.assertOutcome(FAIL, self.check(base, "HEAD"), "is not main's next-patch placeholder 3.5.2-dev0")
         # a dependency line changed by another value (LockfileOwner has one at main's version)
         r.g("switch", "-q", "-c", "dep", m)
-        set_package_version(r.releaser, "3.5.2-dev0")
+        set_package_version(r.releaser, "3.5.2-dev0", lock=False)
         lock = (r.releaser / "package-lock.json").read_text().replace('"version": "1.3.0"', '"version": "1.3.1"')
         (r.releaser / "package-lock.json").write_text(lock)
         r.g("commit", "-q", "-am", "chore: open 3.5.2-dev0 dev cycle")
-        self.assertOutcome(FAIL, self.check(base, "HEAD"), "a line changes more than the version value")
+        self.assertOutcome(FAIL, self.check(base, "HEAD"), "changes more than the version value")
 
     def test_version_txt(self):
         r, base, m = self.build("version-txt")
