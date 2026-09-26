@@ -14,6 +14,7 @@ dependency, a repository without a lockfile, tag names, and exit codes.
 from __future__ import annotations
 
 import json
+import re
 import unittest
 
 from backmerge_support import ReleasedRepo, Sandbox, set_package_version, set_pyproject_version
@@ -96,11 +97,13 @@ class MainScenario(CheckCase):
                            "changes app.txt")
 
     def test_07_extra_commit_below_the_merge(self):
+        # the simulation's "first parent not on develop"; condition 1 refuses it
+        # first, and FirstParentAndSecondParent reaches condition 2 itself
         wt = self.branch("x-before-m", "origin/develop")
         ReleasedRepo.edit(wt, "app.txt", "sneak\n")
         self.commit_all("fix: sneak")
         self.repo.g("merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop after v0.1.1")
-        self.assertOutcome(FAIL, self.check(self.BASE, "HEAD"))
+        self.assertOutcome(FAIL, self.check(self.BASE, "HEAD"), "sits below the merge")
 
     # rejected: a merge whose tree was altered
     def test_08_evil_merge(self):
@@ -113,12 +116,31 @@ class MainScenario(CheckCase):
 
     # rejected: a merge of a commit that is not on main
     def test_09_second_parent_not_on_main(self):
+        # refused at condition 1 as well: the unreleased commit is a second one off main
         wt = self.branch("x-notmain-src", "origin/main")
         ReleasedRepo.edit(wt, "app.txt", "unreleased\n")
         notmain = self.commit_all("fix: never pushed to main")
         self.branch("x-notmain", "origin/develop")
         self.repo.g("merge", "-q", "--no-ff", notmain, "-m", "Back-merge: main → develop after v0.1.1")
-        self.assertOutcome(FAIL, self.check(self.BASE, "HEAD"))
+        self.assertOutcome(FAIL, self.check(self.BASE, "HEAD"), "sits below the merge")
+
+    # condition 2 on its own: the merge is the only commit off main
+    def test_first_parent_on_main_not_on_develop(self):
+        self.branch("x-p1-main", self.repo.tag_commit)
+        self.repo.g("merge", "-q", "--no-ff", self.MAINTIP, "-m", "Back-merge: main → develop after v0.1.1")
+        self.assertOutcome(FAIL, self.check(self.BASE, "HEAD"), "is not on develop")
+
+    def test_second_parent_on_develop_not_on_main(self):
+        self.branch("x-p2-develop", self.P)
+        self.repo.g("merge", "-q", "--no-ff", self.BASE, "-m", "Back-merge: main → develop after v0.1.1")
+        self.assertOutcome(FAIL, self.check(self.BASE, "HEAD"), "is not on main")
+
+    def test_a_head_without_a_version_line(self):
+        wt = self.branch("x-no-version", self.M)
+        text = (wt / "pyproject.toml").read_text()
+        (wt / "pyproject.toml").write_text("\n".join(l for l in text.split("\n") if not l.startswith("version")))
+        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_all("chore: a dynamic version")),
+                           "no version line in head's pyproject.toml")
 
     def test_10_second_parent_is_a_working_branch(self):
         wt = self.branch("x-feature-src", self.P)
@@ -423,6 +445,15 @@ class LockfileOwner(CheckCase):
         r.g("commit", "-q", "-am", "chore: open 3.5.2-dev0 dev cycle")
         self.assertOutcome(FAIL, self.check(base, "HEAD"), "is not the root package's version")
 
+    def test_package_lock_json_root_entry_left_behind(self):
+        r, base, m = self.build("package")
+        set_package_version(r.releaser, "3.5.2-dev0", lock=False)
+        lock = json.loads((r.releaser / "package-lock.json").read_text())
+        lock["version"] = "3.5.2-dev0"   # packages[""] left at 3.5.1
+        (r.releaser / "package-lock.json").write_text(json.dumps(lock, indent=2) + "\n")
+        r.g("commit", "-q", "-am", "chore: open 3.5.2-dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD"), "package-lock.json still records 3.5.1 for the project")
+
     def test_uv_lock(self):
         r, base, m = self.build("pyproject", lock_project_version=False)
         set_pyproject_version(r.releaser, "0.1.2.dev0")
@@ -435,6 +466,28 @@ class LockfileOwner(CheckCase):
         (r.releaser / "uv.lock").write_text(lock.replace('version = "0.1.1"', 'version = "0.1.2.dev0"'))
         r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
         self.assertOutcome(FAIL, self.check(base, "HEAD"), "is not in the sim-app package block")
+
+
+class NormalisedName(CheckCase):
+    """A project name that uv records normalised: Sim_App in pyproject.toml, sim-app in uv.lock."""
+
+    def test_open_cycle(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject", changelog=False, project_name="Sim_App")
+        self.assertIn('name = "sim-app"', (r.releaser / "uv.lock").read_text())
+        r.g("fetch", "-q", "origin")
+        base = r.g("rev-parse", "origin/develop")
+        r.g("switch", "-q", "-c", "back-merge", "origin/develop")
+        r.g("merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop")
+        m = r.g("rev-parse", "HEAD")
+        r.set_version(r.releaser, "0.1.2.dev0")
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(PASS, self.check(base, "HEAD", tag="v0.1.1"))
+        r.g("switch", "-q", "-c", "stale", m)
+        set_pyproject_version(r.releaser, "0.1.2.dev0", lock=False)
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD"), "uv.lock still records 0.1.1")
 
 
 class RealSizedLockfiles(CheckCase):
@@ -467,6 +520,24 @@ class RealSizedLockfiles(CheckCase):
         r, base = self.build("package", "3.5.2-dev0")
         self.assertGreater((r.releaser / "package-lock.json").stat().st_size, 300_000)
         self.assertOutcome(PASS, self.check(base, "HEAD", tag="v3.5.1"), "3.5.1 -> 3.5.2-dev0")
+
+
+class CopiesAgree(unittest.TestCase):
+    """back-merge-check copies _sot.sh's reading at a commit rather than sourcing it
+    (a pin's floor rises only with the pinned script's own file); the copies must agree."""
+
+    @staticmethod
+    def reading_lines(name):
+        from backmerge_support import SCRIPTS
+        text = (SCRIPTS / name).read_text()
+        return [l.strip() for l in text.splitlines()
+                if re.match(r"\s+(pyproject|package|version-txt)\)\s+git show", l)
+                or re.match(r"\s+if\s+git cat-file -e|\s+elif git cat-file -e", l)]
+
+    def test_version_reading(self):
+        ours, theirs = self.reading_lines("back-merge-check"), self.reading_lines("_sot.sh")
+        self.assertEqual(len(ours), 6)
+        self.assertEqual(ours, theirs)
 
 
 if __name__ == "__main__":

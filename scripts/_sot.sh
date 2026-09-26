@@ -33,7 +33,10 @@ sot_read() {  # echoes the current version
 # From a committed tree rather than the working tree, read as the version guard
 # reads it (the first `version` line), so that git-back-merge can read origin/main
 # and origin/develop without checking them out. back-merge-check carries its own
-# copy, so that the guard can run it alone. Each reader in these pipelines reads
+# copy rather than sourcing this file: a workflow pin's floor rises only with a
+# change to the pinned script's own file (the handbook's ci.md), so a change to
+# the check's behaviour must be a change to scripts/back-merge-check. The two
+# copies are kept equal by hand. Each reader in these pipelines reads
 # to the end of its input: one that stops early (head -1, awk's exit) can leave
 # git show to die of SIGPIPE, and under pipefail the pipeline then fails.
 sot_kind_at() {  # $1 = commit; echoes pyproject | package | version-txt | none
@@ -45,7 +48,7 @@ sot_kind_at() {  # $1 = commit; echoes pyproject | package | version-txt | none
 
 sot_read_at() {  # $1 = commit, $2 = kind (from sot_kind_at); echoes the version there
   case "$2" in
-    pyproject)   git show "$1:pyproject.toml" | awk '!f && /^version *= *"/{print; f=1}' | sed -E 's/^version *= *"([^"]*)".*/\1/' ;;
+    pyproject)   git show "$1:pyproject.toml" | awk '!f && /^version *=/{print; f=1}' | sed -E "s/^version *= *[\"']([^\"']*)[\"'].*/\\1/" ;;
     package)     git show "$1:package.json" | awk '!f && /"version" *:/{print; f=1}' | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
     version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
   esac

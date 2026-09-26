@@ -90,13 +90,18 @@ def package_lock_text(name: str, version: str, bulk: int = 0, twin: str | None =
                        "packages": packages}, indent=2) + "\n"
 
 
+def normalised(name: str) -> str:
+    """A package name as uv records it (PEP 503)."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def set_pyproject_version(wt: Path, version: str, lock: bool = True) -> None:
     p = wt / "pyproject.toml"
     text = p.read_text()
     name = re.search(r'(?m)^name = "([^"]*)"', text).group(1)
     p.write_text(re.sub(r'(?m)^version = "[^"]*"', f'version = "{version}"', text, count=1))
     if lock and (wt / "uv.lock").exists():
-        set_uv_lock_version(wt, name, version)
+        set_uv_lock_version(wt, normalised(name), version)
 
 
 def set_uv_lock_version(wt: Path, name: str, version: str) -> None:
@@ -135,7 +140,7 @@ a = sys.argv[1:]
 if a[:1] == ["version"] and len(a) >= 2:
     v = [x for x in a[1:] if not x.startswith("-")][0]
     text = open("pyproject.toml").read()
-    name = re.search(r'(?m)^name = "([^"]*)"', text).group(1)
+    name = re.sub(r"[-_.]+", "-", re.search(r'(?m)^name = "([^"]*)"', text).group(1)).lower()
     open("pyproject.toml", "w").write(re.sub(r'(?m)^version = "[^"]*"', 'version = "%s"' % v, text, count=1))
     if os.path.exists("uv.lock"):
         lines = open("uv.lock").read().splitlines(True); inside = False
@@ -496,8 +501,10 @@ class ReleasedRepo:
 
     def __init__(self, sb: Sandbox, kind: str = "pyproject", feature_during_release: bool = True,
                  changelog: bool | None = None, lockfile: bool = True, lock_bulk: int = 0,
-                 lock_twin: bool = False, lock_project_version: bool = True) -> None:
+                 lock_twin: bool = False, lock_project_version: bool = True,
+                 project_name: str = "sim-app") -> None:
         self.sb, self.kind = sb, kind
+        self.project_name = project_name
         self.lock_bulk, self.lock_twin, self.lock_project_version = lock_bulk, lock_twin, lock_project_version
         self.v1, self.v2, self.placeholder, self.dev1 = self.VERSIONS[kind]
         self.tag1, self.tag2 = "v" + self.v1, "v" + self.v2
@@ -561,10 +568,10 @@ class ReleasedRepo:
 
     def write_version_files(self, wt: Path, version: str, lockfile: bool = True) -> None:
         if self.kind == "pyproject":
-            (wt / "pyproject.toml").write_text(pyproject_text("sim-app", version))
+            (wt / "pyproject.toml").write_text(pyproject_text(self.project_name, version))
             if lockfile:
                 (wt / "uv.lock").write_text(uv_lock_text(
-                    "sim-app", version, self.lock_bulk, self.v2 if self.lock_twin else None, self.lock_project_version))
+                    normalised(self.project_name), version, self.lock_bulk, self.v2 if self.lock_twin else None, self.lock_project_version))
         elif self.kind == "package":
             (wt / "package.json").write_text(package_json_text("sim-node", version))
             if lockfile:
