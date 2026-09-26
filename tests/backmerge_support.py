@@ -408,7 +408,12 @@ class Sandbox:
         return self.run(["git", *args], cwd, env=env, check=check).stdout.strip()
 
     def script(self, name: str, *args, cwd, env=None) -> subprocess.CompletedProcess:
-        return self.run([BASH, str(SCRIPTS / name), *args], cwd, env=env, check=False)
+        """Run a script; a shell fault in its stderr (a bash 3.2 misparse, say) fails the test."""
+        r = self.run([BASH, str(SCRIPTS / name), *args], cwd, env=env, check=False)
+        for fault in ("syntax error", "command not found", "unbound variable", "bad substitution"):
+            if fault in r.stderr:
+                raise AssertionError(f"{name}: shell fault '{fault}':\n{r.stderr}")
+        return r
 
     # --- the fake GitHub's state
     def gh_state(self) -> dict:

@@ -1,0 +1,342 @@
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The unit tests of scripts/git-back-merge.
+
+Each case makes a release in temporary repositories (a bare origin, a clone that
+made the history, and a clone with develop checked out, from which the command
+runs) and a fake GitHub (tests/backmerge_support.py) whose pull-request merge
+really merges into the bare origin's develop. The cases follow the design's
+thirteen steps: the refusal before the switch, the wait for the release and the
+acceptance of a changelog job repaired by hand, resumption, the rebuild when
+develop moves, the two classes of conflict, the three version files, and the
+dry run.
+"""
+
+from __future__ import annotations
+
+import os
+import unittest
+
+from backmerge_support import ReleasedRepo, Sandbox
+
+RELEASES_MD = """# Versioning & releases
+
+## Cutting a release
+
+Promote, bump, tag.
+
+## After the release: the back-merge cascade (mandatory)
+
+Merge main into develop with --no-ff and push.
+
+## Development versioning
+
+Open the next cycle.
+"""
+
+RELEASES_MD_TRANSITION = RELEASES_MD.replace(
+    "## Development versioning",
+    "## The transition\n\nUntil the switch: the direct back-merge, then git dev-release --open.\n\n## Development versioning")
+
+
+class BackMergeCase(unittest.TestCase):
+
+    def setUp(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.handbook = self.sb.tmp / "handbook"
+        (self.handbook / "docs").mkdir(parents=True)
+        (self.handbook / "docs" / "releases.md").write_text(RELEASES_MD)
+
+    def make(self, kind="pyproject", **kw):
+        self.repo = ReleasedRepo(self.sb, kind, **kw)
+        self.sb.set_gh_state(self.repo.gh_state())
+        return self.repo
+
+    def back_merge(self, *args):
+        return self.sb.script("git-back-merge", *args, cwd=self.repo.dev,
+                              env={"PARKVIEWLAB_HANDBOOK": str(self.handbook)})
+
+    def origin(self, *args, check=True):
+        return self.sb.git(self.repo.origin, *args, check=check)
+
+    def out(self, r):
+        return r.stdout + r.stderr
+
+    def assertOk(self, r):
+        self.assertEqual(r.returncode, 0, self.out(r))
+
+    def assertRefused(self, r, fragment):
+        self.assertEqual(r.returncode, 1, self.out(r))
+        self.assertIn(fragment, self.out(r))
+
+    def is_ancestor(self, a, b):
+        return self.sb.run(["git", "merge-base", "--is-ancestor", a, b], self.repo.origin, check=False).returncode == 0
+
+    def assertNoResidue(self):
+        """No temporary worktree, no local back-merge branch, nothing left in TMPDIR."""
+        wts = self.sb.git(self.repo.dev, "worktree", "list", "--porcelain")
+        self.assertEqual(wts.count("worktree "), 1, wts)
+        self.assertEqual(self.sb.git(self.repo.dev, "branch", "--list", "back-merge-*"), "")
+        self.assertEqual(os.listdir(self.sb.tmp / "t"), [])
+
+    def push_to_develop(self, name, text, message):
+        r = self.repo
+        r.g("fetch", "-q", "origin")
+        r.g("switch", "-q", "develop")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        ReleasedRepo.edit(r.releaser, name, text)
+        r.g("add", name)
+        r.g("commit", "-q", "-m", message)
+        r.g("push", "-q", "origin", "develop")
+
+
+class HappyPaths(BackMergeCase):
+
+    def test_pyproject_repository(self):
+        r = self.make("pyproject")
+        result = self.back_merge()
+        self.assertOk(result)
+        tip = self.origin("rev-parse", "develop")
+        self.assertTrue(self.is_ancestor(r.tag_commit, tip))
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
+        self.assertEqual(self.origin("log", "-1", "--format=%s", tip),
+                         "chore(release): back-merge main into develop after v0.1.1 (#7)")
+        c = self.origin("rev-parse", tip + "^2")
+        self.assertEqual(self.origin("log", "-1", "--format=%s", c), "chore: open 0.1.2.dev0 dev cycle")
+        self.assertEqual(self.origin("log", "-1", "--format=%s", c + "^"), "Back-merge: main → develop after v0.1.1")
+        self.assertEqual(self.origin("rev-parse", c + "^^2"), r.main_tip)
+        self.assertEqual(sorted(self.origin("diff", "--name-only", c + "^", c).split()), ["pyproject.toml", "uv.lock"])
+        st = self.sb.gh_state()
+        self.assertEqual(len(st["prs"]), 1)
+        pr = st["prs"][0]
+        self.assertEqual((pr["title"], pr["base"], pr["labels"], pr["state"]),
+                         ("chore(release): back-merge main into develop after v0.1.1", "develop",
+                          ["release-bookkeeping"], "MERGED"))
+        self.assertIn("release-bookkeeping", st["labels"])
+        merges = [c for c in st["calls"] if c[:2] == ["pr", "merge"]]
+        self.assertEqual(len(merges), 1)
+        self.assertIn("--merge", merges[0])
+        self.assertIn("--match-head-commit", merges[0])
+        self.assertNotIn("--admin", merges[0])
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertEqual(self.sb.git(r.dev, "rev-parse", "develop"), tip)
+        self.assertNoResidue()
+        # a second run finds the back-merge landed
+        again = self.back_merge()
+        self.assertOk(again)
+        self.assertIn("already an ancestor of origin/develop", again.stdout)
+        self.assertEqual(len(self.sb.gh_state()["prs"]), 1)
+
+    def test_package_json_repository(self):
+        r = self.make("package")
+        self.assertOk(self.back_merge())
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "3.5.2-dev0")
+        lock = self.origin("show", "develop:package-lock.json")
+        self.assertEqual(lock.count('"version": "3.5.2-dev0"'), 2)
+        self.assertNoResidue()
+
+    def test_version_txt_repository_takes_no_open_cycle_commit(self):
+        r = self.make("version-txt")
+        self.assertOk(self.back_merge())
+        tip = self.origin("rev-parse", "develop")
+        self.assertEqual(self.origin("log", "-1", "--format=%s", tip + "^2"), "Back-merge: main → develop after v0.23.1")
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.23.1")
+        self.assertNoResidue()
+
+    def test_no_feature_during_the_release(self):
+        # develop is an ancestor of main: --no-ff must still make the merge
+        r = self.make("pyproject", feature_during_release=False)
+        self.assertOk(self.back_merge())
+        tip = self.origin("rev-parse", "develop")
+        self.assertEqual(self.origin("log", "-1", "--format=%s", tip + "^2^"), "Back-merge: main → develop after v0.1.1")
+
+    def test_unprotected_develop(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(protection=None)
+        self.assertOk(self.back_merge())
+
+    def test_dry_run_changes_nothing(self):
+        r = self.make("pyproject")
+        before = self.origin("for-each-ref", "--format=%(refname) %(objectname)")
+        result = self.back_merge("--dry-run")
+        self.assertOk(result)
+        self.assertIn("(dry run)", result.stdout)
+        self.assertIn("PASS", result.stdout)
+        self.assertEqual(self.origin("for-each-ref", "--format=%(refname) %(objectname)"), before)
+        self.assertEqual(self.sb.gh_state()["prs"], [])
+        self.assertNoResidue()
+
+
+class TheRelease(BackMergeCase):
+
+    def test_waits_for_the_release_run_to_start_and_finish(self):
+        r = self.make("pyproject")
+        st = self.sb.gh_state()
+        st["runs"][0].update(appears_after=1, in_progress_polls=2)
+        self.sb.set_gh_state(st)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("has not started", result.stdout)
+        self.assertIn("still running", result.stdout)
+        self.assertGreaterEqual(self.sb.gh_state()["run_list_calls"], 4)
+
+    def test_changelog_job_failed_and_repaired_by_hand_is_accepted(self):
+        self.make("pyproject")
+        st = self.sb.gh_state()
+        st["runs"][0].update(conclusion="failure", jobs=[{"name": "gate", "conclusion": "success"},
+                                                         {"name": "changelog", "conclusion": "failure"}])
+        self.sb.set_gh_state(st)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("repaired by hand", result.stdout)
+
+    def test_changelog_job_failed_without_a_release_is_refused(self):
+        self.make("pyproject")
+        st = self.sb.gh_state()
+        st["runs"][0].update(conclusion="failure", jobs=[{"name": "changelog", "conclusion": "failure"}])
+        st["releases"] = []
+        self.sb.set_gh_state(st)
+        self.assertRefused(self.back_merge(), "has no GitHub Release")
+
+    def test_another_failed_job_is_refused(self):
+        self.make("pyproject")
+        st = self.sb.gh_state()
+        st["runs"][0].update(conclusion="failure", jobs=[{"name": "gate", "conclusion": "failure"}])
+        self.sb.set_gh_state(st)
+        self.assertRefused(self.back_merge(), "concluded 'failure'")
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+
+    def test_a_named_tag_that_is_not_mains_version_is_refused(self):
+        self.make("pyproject")
+        self.assertRefused(self.back_merge("v0.1.0"), "not v0.1.0's")
+
+    def test_not_switched_quotes_the_handbook(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(allow_merge_commit=False)
+        result = self.back_merge()
+        self.assertRefused(result, "does not allow merge commits")
+        self.assertIn("After the release: the back-merge cascade", result.stderr)
+        self.assertIn("git dev-release --open", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+
+    def test_not_switched_quotes_the_transition_section_once_released(self):
+        self.make("pyproject")
+        (self.handbook / "docs" / "releases.md").write_text(RELEASES_MD_TRANSITION)
+        self.sb.update_gh_state(allow_merge_commit=False)
+        result = self.back_merge()
+        self.assertRefused(result, "## The transition")
+        self.assertNotIn("After the release", result.stderr)
+
+
+class Conflicts(BackMergeCase):
+
+    def test_version_line_conflict_is_refused_before_merging(self):
+        self.make("pyproject")
+        r = self.repo
+        r.g("fetch", "-q", "origin")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, "0.1.1.dev1")
+        r.g("commit", "-q", "-am", "chore: dev build v0.1.1.dev1")
+        r.g("push", "-q", "origin", "develop")
+        result = self.back_merge()
+        self.assertRefused(result, "decision 6 (a)")
+        self.assertIn("0.1.1.dev1", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+    def test_other_conflict_is_refused_and_cleaned_up(self):
+        self.make("pyproject")
+        self.push_to_develop("CHANGELOG.md", "# Changelog\n\nAn edit on develop during the release\n",
+                             "docs: edit the changelog during the release (#4)")
+        result = self.back_merge()
+        self.assertRefused(result, "conflicts in: CHANGELOG.md")
+        self.assertIn("decision 6 (d)", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+
+class Resumption(BackMergeCase):
+
+    def failing_first_run(self):
+        self.make("pyproject")
+        st = self.sb.gh_state()
+        st["checks"]["result"]["test"] = "fail"
+        self.sb.set_gh_state(st)
+        first = self.back_merge()
+        self.assertRefused(first, "required checks failed: test")
+        st = self.sb.gh_state()
+        self.assertEqual(st["prs"][0]["state"], "OPEN")
+        head = self.origin("rev-parse", "back-merge-v0.1.1")
+        st["checks"]["result"]["test"] = "pass"
+        self.sb.set_gh_state(st)
+        self.assertNoResidue()
+        return head
+
+    def test_a_current_open_pull_request_is_resumed_not_rebuilt(self):
+        head = self.failing_first_run()
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("current with origin/develop, and passes the check", result.stdout)
+        st = self.sb.gh_state()
+        self.assertEqual(len(st["prs"]), 1)
+        self.assertEqual(st["prs"][0]["mergedHead"], head)
+
+    def test_a_stale_open_pull_request_is_rebuilt_in_place(self):
+        head = self.failing_first_run()
+        self.push_to_develop("h.txt", "feature H\n", "feat: feature H (#5)")
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("is rebuilt from origin/develop", result.stdout)
+        self.assertIn("force-pushed", result.stdout)
+        st = self.sb.gh_state()
+        self.assertEqual(len(st["prs"]), 1)
+        self.assertNotEqual(st["prs"][0]["mergedHead"], head)
+        self.assertTrue(self.is_ancestor(self.repo.tag_commit, "develop"))
+        self.assertEqual(self.origin("show", "develop:h.txt"), "feature H")
+
+    def test_develop_moving_during_the_checks_rebuilds(self):
+        self.make("pyproject")
+        st = self.sb.gh_state()
+        st["checks"]["move_develop_on"] = [1]
+        self.sb.set_gh_state(st)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("rebuilding (1 of 3)", result.stdout)
+        self.assertEqual(len(self.sb.gh_state()["prs"]), 1)
+        self.assertEqual(self.origin("show", "develop:moved-1.txt"), "moved-1")
+        self.assertNoResidue()
+
+    def test_develop_moving_every_time_gives_up_after_three_rebuilds(self):
+        self.make("pyproject")
+        st = self.sb.gh_state()
+        st["checks"]["move_develop_always"] = True
+        self.sb.set_gh_state(st)
+        result = self.back_merge()
+        self.assertRefused(result, "develop moved 3 times")
+        self.assertEqual(self.sb.gh_state()["prs"][0]["state"], "OPEN")
+        self.assertNoResidue()
+
+    def test_a_refused_merge_leaves_the_pull_request_open(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(refuse_merges=1)
+        result = self.back_merge()
+        self.assertRefused(result, "refused to merge")
+        self.assertEqual(self.sb.gh_state()["prs"][0]["state"], "OPEN")
+
+    def test_an_older_back_merge_pull_request_is_closed(self):
+        r = self.make("pyproject")
+        r.g("push", "-q", "origin", f"{r.promoted}:refs/heads/back-merge-v0.1.0")
+        st = self.sb.gh_state()
+        st["prs"].append({"number": 3, "head": "back-merge-v0.1.0", "base": "develop", "title": "old",
+                          "body": "", "labels": ["release-bookkeeping"], "state": "OPEN",
+                          "url": "https://github.com/ParkviewLab/sim/pull/3"})
+        self.sb.set_gh_state(st)
+        self.assertOk(self.back_merge())
+        old = [p for p in self.sb.gh_state()["prs"] if p["number"] == 3][0]
+        self.assertEqual(old["state"], "CLOSED")
+        self.assertIn("Superseded by #7", old["closeComment"])
+
+
+if __name__ == "__main__":
+    unittest.main()
