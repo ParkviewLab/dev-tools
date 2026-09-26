@@ -66,14 +66,16 @@ if [[ "$OPEN" == 0 && -z "$KIND" ]]; then
   exit 2
 fi
 
-git fetch --quiet --tags origin develop || { echo "git dev-release: cannot fetch develop from origin" >&2; exit 1; }
+# develop alone: the workflow is read from it. A tag fetch could fail on a local
+# tag that differs from origin's, and the tags serve only the dispatch's message.
+git fetch --quiet origin develop || { echo "git dev-release: cannot fetch develop from origin" >&2; exit 1; }
 WF="$(git show origin/develop:.github/workflows/dev-release.yml 2>/dev/null || true)"
 
 # Whether the workflow's workflow_dispatch trigger declares an input named `kind`.
 declares_kind() {
   printf '%s\n' "$WF" | awk '
     /^[[:space:]]*(#|$)/ { next }
-    /^[^[:space:]]/ { on = ($0 ~ /^"?on"?[[:space:]]*:/); wd = 0; inp = 0; next }
+    /^[^[:space:]]/ { on = ($0 ~ /^["\047]?on["\047]?[[:space:]]*:/); wd = 0; inp = 0; next }
     { ind = match($0, /[^ ]/) }
     on && !wd && /^[[:space:]]+workflow_dispatch[[:space:]]*:/ { wd = 1; wdind = ind; next }
     on && wd {
@@ -82,7 +84,7 @@ declares_kind() {
       if (inp) {
         if (ind <= inpind) { inp = 0; next }
         if (child == 0) child = ind
-        if (ind == child && /^[[:space:]]+"?kind"?[[:space:]]*:/) found = 1
+        if (ind == child && /^[[:space:]]+["\047]?kind["\047]?[[:space:]]*:/) found = 1
       }
     }
     END { exit !found }'
@@ -90,6 +92,7 @@ declares_kind() {
 
 # --- a dev build whose workflow declares the kind input: dispatch, commit nothing ---
 if [[ "$OPEN" == 0 ]] && declares_kind; then
+  git fetch --quiet --tags origin 2>/dev/null || echo "(the tags could not be fetched; the newest release below is the local one)"
   last="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
   if [[ "$(sot_kind)" == pyproject ]]; then sep=".dev"; else sep="-dev"; fi
   if [[ -n "$last" ]]; then

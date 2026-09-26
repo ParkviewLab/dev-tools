@@ -28,6 +28,7 @@ WF_KIND = (
 )
 WF_KIND_SECOND_INPUT = WF_KIND.replace("    inputs:\n", "    inputs:\n      verbose:\n        type: boolean\n")
 WF_KIND_QUOTED_ON = WF_KIND.replace("\non:\n", '\n"on":\n')
+WF_KIND_SINGLE_QUOTED = WF_KIND.replace("\non:\n", "\n'on':\n").replace("      kind:\n", "      'kind':\n")
 WF_KIND_IN_A_JOB = WF_NO_INPUT.replace("    runs-on: ubuntu-latest\n",
                                        "    runs-on: ubuntu-latest\n    env:\n      kind: patch\n")
 WF_KIND_NESTED = WF_NO_INPUT.replace("  workflow_dispatch:\n",
@@ -85,6 +86,13 @@ class BeforeTheSwitch(DevReleaseCase):
         self.assertRegex(self.sb.git(r.origin, "log", "-1", "--format=%s", "develop"), r"^chore: open .* dev cycle$")
         self.assertEqual(self.dispatches(), [])
 
+    def test_a_local_tag_that_differs_from_origins_does_not_stop_it(self):
+        r = self.make()
+        self.sb.git(r.dev, "tag", "-f", "-a", "v0.1.0", "-m", "a local tag, not origin's", "develop")
+        res = self.dev_release("patch")
+        self.assertEqual(res.returncode, 0, self.out(res))
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.1.dev1")
+
     def test_dry_run_changes_nothing(self):
         self.make()
         res = self.dev_release("--dry-run", "patch")
@@ -123,6 +131,10 @@ class TheKindInput(DevReleaseCase):
 
     def test_quoted_on_key(self):
         self.make(workflow=WF_KIND_QUOTED_ON)
+        self.assertDispatchedWith("patch", self.dev_release("patch"))
+
+    def test_single_quoted_keys(self):
+        self.make(workflow=WF_KIND_SINGLE_QUOTED)
         self.assertDispatchedWith("patch", self.dev_release("patch"))
 
     def test_dry_run_dispatches_nothing(self):
