@@ -14,9 +14,9 @@
 #   git bump release   # finalize a dev cycle: 0.2.0.dev1 -> 0.2.0
 #   git bump 0.1.7     # explicit version
 #
-# From a dev version (e.g. 0.2.0.dev0, the open-cycle placeholder), <kind> re-points
-# off the last release tag and finalizes: patch -> 0.2.0, minor -> 0.3.0, major ->
-# 1.0.0. See the handbook's releases.md ("Development versioning").
+# From a dev version (e.g. 0.1.6.dev0, the open-cycle placeholder opened after
+# v0.1.5), <kind> re-points off the last release tag and finalizes: patch -> 0.1.6,
+# minor -> 0.2.0, major -> 1.0.0. See the handbook's releases.md ("Development versioning").
 
 set -euo pipefail
 

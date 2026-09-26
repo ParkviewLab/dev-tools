@@ -14,7 +14,7 @@
 #     the CI workspace, from the newest release tag, the kind and the run number
 #     (X.Y.Z.devN, or X.Y.Z-devN for package.json): this command dispatches it on
 #     develop with that input and commits nothing;
-#   - where it does not, as in a repository that has not yet switched to merge
+#   - where it does not, in a repository that does not yet allow merge
 #     commits, it sets the version file to the next dev version of the chosen
 #     target, commits, pushes develop and dispatches the workflow.
 #

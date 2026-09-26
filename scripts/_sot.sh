@@ -105,7 +105,7 @@ sot_compute_next() {
   esac
 }
 
-# --- dev versions (for git-dev-release) ------------------------------------
+# --- dev versions (for git-dev-release, and git back-merge's placeholder) --
 sot_dev_n() {  # echoes the .devN / -devN number in $1, or -1 if none
   case "$1" in
     *.dev[0-9]*) echo "${1##*.dev}" ;;
