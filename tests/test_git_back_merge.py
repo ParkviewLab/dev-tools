@@ -136,6 +136,14 @@ class HappyPaths(BackMergeCase):
         self.assertEqual(lock.count('"version": "3.5.2-dev0"'), 2)
         self.assertNoResidue()
 
+    def test_real_sized_lockfile(self):
+        # step 9's check reads the lockfile through pipelines; a real one's bulk
+        # after the version line once made it exit 141 and refuse a clean branch
+        r = self.make("package", lock_bulk=3000)
+        self.assertOk(self.back_merge())
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "3.5.2-dev0")
+        self.assertNoResidue()
+
     def test_version_txt_repository_takes_no_open_cycle_commit(self):
         r = self.make("version-txt")
         self.assertOk(self.back_merge())

@@ -323,5 +323,37 @@ class OtherKinds(CheckCase):
         self.assertOutcome(FAIL, self.check(base, "HEAD"))
 
 
+class RealSizedLockfiles(CheckCase):
+    """Lockfiles with a real one's bulk after the project's version line.
+
+    The check reads a lockfile through a pipeline; a reader that stops early
+    leaves the writer to die of SIGPIPE, and under pipefail that failed a clean
+    back-merge with status 141. A few thousand entries put far more than a pipe
+    buffer after the line.
+    """
+
+    def build(self, kind, placeholder):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, kind, lock_bulk=3000)
+        r.g("fetch", "-q", "origin")
+        base = r.g("rev-parse", "origin/develop")
+        r.g("switch", "-q", "-c", "back-merge", "origin/develop")
+        r.g("merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop")
+        r.set_version(r.releaser, placeholder)
+        r.g("commit", "-q", "-am", f"chore: open {placeholder} dev cycle")
+        return r, base
+
+    def test_uv_lock(self):
+        r, base = self.build("pyproject", "0.1.2.dev0")
+        self.assertGreater((r.releaser / "uv.lock").stat().st_size, 300_000)
+        self.assertOutcome(PASS, self.check(base, "HEAD", tag="v0.1.1"), "0.1.1 -> 0.1.2.dev0")
+
+    def test_package_lock_json(self):
+        r, base = self.build("package", "3.5.2-dev0")
+        self.assertGreater((r.releaser / "package-lock.json").stat().st_size, 300_000)
+        self.assertOutcome(PASS, self.check(base, "HEAD", tag="v3.5.1"), "3.5.1 -> 3.5.2-dev0")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -397,7 +397,7 @@ wait_for_checks() {  # 11. 0 = the required checks passed on HEAD_SHA; exits on 
       if [[ -n "$CONTEXTS" ]]; then
         local IFS=,
         for c in $CONTEXTS; do
-          b="$(printf '%s\n' "$out" | awk -F"$TAB" -v n="$c" '$1==n{print $2; exit}')"
+          b="$(printf '%s\n' "$out" | awk -F"$TAB" -v n="$c" '!f && $1==n{print $2; f=1}')"
           case "$b" in
             pass|skipping) ;;
             fail|cancel) bad="$bad $c" ;;

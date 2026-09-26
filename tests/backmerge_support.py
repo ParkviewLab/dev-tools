@@ -40,9 +40,11 @@ def pyproject_text(name: str, version: str) -> str:
     )
 
 
-def uv_lock_text(name: str, version: str) -> str:
+def uv_lock_text(name: str, version: str, bulk: int = 0) -> str:
     # A dependency's block comes first, so that a version line which is not the
-    # project's can be told apart from the project's own.
+    # project's can be told apart from the project's own. bulk adds that many
+    # dependency blocks after the project's, as a real lockfile has: well over a
+    # pipe buffer of text after the version line, once bulk is in the thousands.
     return (
         "version = 1\n"
         "revision = 3\n"
@@ -58,7 +60,9 @@ def uv_lock_text(name: str, version: str) -> str:
         "dependencies = [\n"
         '    { name = "idna" },\n'
         "]\n"
-    )
+    ) + "".join(
+        f'\n[[package]]\nname = "dep-{i:05d}"\nversion = "1.0.{i}"\n'
+        'source = { registry = "https://pypi.org/simple" }\n' for i in range(bulk))
 
 
 def package_json_text(name: str, version: str) -> str:
@@ -66,15 +70,17 @@ def package_json_text(name: str, version: str) -> str:
                        "dependencies": {"left-pad": "^1.3.0"}}, indent=2) + "\n"
 
 
-def package_lock_text(name: str, version: str) -> str:
-    return json.dumps({
-        "name": name, "version": version, "lockfileVersion": 3, "requires": True,
-        "packages": {
-            "": {"name": name, "version": version, "dependencies": {"left-pad": "^1.3.0"}},
-            "node_modules/left-pad": {"version": "1.3.0",
-                                      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"},
-        },
-    }, indent=2) + "\n"
+def package_lock_text(name: str, version: str, bulk: int = 0) -> str:
+    packages = {
+        "": {"name": name, "version": version, "dependencies": {"left-pad": "^1.3.0"}},
+        "node_modules/left-pad": {"version": "1.3.0",
+                                  "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"},
+    }
+    for i in range(bulk):
+        packages[f"node_modules/dep-{i:05d}"] = {
+            "version": f"1.0.{i}", "resolved": f"https://registry.npmjs.org/dep-{i:05d}/-/dep-{i:05d}-1.0.{i}.tgz"}
+    return json.dumps({"name": name, "version": version, "lockfileVersion": 3, "requires": True,
+                       "packages": packages}, indent=2) + "\n"
 
 
 def set_pyproject_version(wt: Path, version: str, lock: bool = True) -> None:
@@ -453,6 +459,8 @@ class ReleasedRepo:
     feature A merged; develop promoted into main, bumped and tagged v2; where
     the release writes a changelog, the bot's changelog commit on main; and,
     if feature_during_release, feature F merged into develop after the promotion.
+    lock_bulk pads the lockfile with that many dependency entries after the
+    project's own, to the size of a real one.
     `releaser` is a clone used to make the history; `dev` is a clone with develop
     checked out, from which git-back-merge is run.
     """
@@ -462,8 +470,9 @@ class ReleasedRepo:
                 "version-txt": ("0.23.0", "0.23.1", None, None)}
 
     def __init__(self, sb: Sandbox, kind: str = "pyproject", feature_during_release: bool = True,
-                 changelog: bool | None = None, lockfile: bool = True) -> None:
+                 changelog: bool | None = None, lockfile: bool = True, lock_bulk: int = 0) -> None:
         self.sb, self.kind = sb, kind
+        self.lock_bulk = lock_bulk
         self.v1, self.v2, self.placeholder, self.dev1 = self.VERSIONS[kind]
         self.tag1, self.tag2 = "v" + self.v1, "v" + self.v2
         self.changelog = (kind != "version-txt") if changelog is None else changelog
@@ -528,11 +537,11 @@ class ReleasedRepo:
         if self.kind == "pyproject":
             (wt / "pyproject.toml").write_text(pyproject_text("sim-app", version))
             if lockfile:
-                (wt / "uv.lock").write_text(uv_lock_text("sim-app", version))
+                (wt / "uv.lock").write_text(uv_lock_text("sim-app", version, self.lock_bulk))
         elif self.kind == "package":
             (wt / "package.json").write_text(package_json_text("sim-node", version))
             if lockfile:
-                (wt / "package-lock.json").write_text(package_lock_text("sim-node", version))
+                (wt / "package-lock.json").write_text(package_lock_text("sim-node", version, self.lock_bulk))
         else:
             (wt / "VERSION.txt").write_text(version + "\n")
 

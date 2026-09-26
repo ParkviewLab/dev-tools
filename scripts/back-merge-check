@@ -74,6 +74,10 @@ MAIN=$(git rev-parse --verify --quiet "$MAIN_REF^{commit}") || die "main ref $MA
 short() { git rev-parse --short "$1"; }
 
 # --- version reading, from committed trees, as the version guard reads them ---
+# Every reader in a pipeline here reads to the end of its input. One that stops
+# early (head -1, awk's exit, grep -q) can leave the writer, git show, to die of
+# SIGPIPE once more than a pipe buffer remains, as it does in a real lockfile;
+# under pipefail the pipeline then fails although its output was right.
 sot_kind_at() {  # $1 = commit; the precedence of dev-tools' _sot.sh
   if   git cat-file -e "$1:pyproject.toml" 2>/dev/null; then echo pyproject
   elif git cat-file -e "$1:package.json"   2>/dev/null; then echo package
@@ -82,8 +86,8 @@ sot_kind_at() {  # $1 = commit; the precedence of dev-tools' _sot.sh
 }
 version_at() {  # $1 = commit, $2 = kind
   case "$2" in
-    pyproject)   git show "$1:pyproject.toml" | grep -E '^version *= *"' | head -1 | sed -E 's/^version *= *"([^"]*)".*/\1/' ;;
-    package)     git show "$1:package.json" | grep -E '"version" *:' | head -1 | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+    pyproject)   git show "$1:pyproject.toml" | awk '!f && /^version *= *"/{print; f=1}' | sed -E 's/^version *= *"([^"]*)".*/\1/' ;;
+    package)     git show "$1:package.json" | awk '!f && /"version" *:/{print; f=1}' | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
     version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
   esac
 }
@@ -140,7 +144,7 @@ set +e
 MT_OUT=$(git merge-tree --write-tree --no-messages "$P1" "$P2")
 MT_RC=$?
 set -e
-AUTO=$(printf '%s\n' "$MT_OUT" | head -1)
+AUTO=${MT_OUT%%$'\n'*}
 [ "$MT_RC" = 0 ] || { [ "$MT_RC" = 1 ] && fail "the automatic merge of the parents conflicts: a hand-resolved back-merge needs a person's review"; die "git merge-tree failed ($MT_RC)"; }
 TREE=$(git rev-parse "$M^{tree}")
 [ "$AUTO" = "$TREE" ] || fail "tree of $(short "$M") differs from the automatic merge of its parents: $(git diff --stat "$AUTO" "$TREE" | tail -1)"
@@ -183,18 +187,18 @@ case "$KIND" in
   package)   SOT=package.json;   LOCK=package-lock.json ;;
 esac
 CHANGED=$(git diff --no-renames --name-only "$M" "$C")
-printf '%s\n' "$CHANGED" | grep -qxF "$SOT" || fail "the open-cycle commit does not change $SOT"
+printf '%s\n' "$CHANGED" | grep -xF "$SOT" >/dev/null || fail "the open-cycle commit does not change $SOT"
 # a lockfile that records the project's version must move with it
 lock_version_at() {  # $1 = commit; prints the project's own version in the lockfile, if any
   local proj
   case "$LOCK" in
     uv.lock)
       git cat-file -e "$1:uv.lock" 2>/dev/null || return 0
-      proj=$(git show "$1:pyproject.toml" | grep -E '^name *= *"' | head -1 | sed -E 's/^name *= *"([^"]*)".*/\1/')
-      git show "$1:uv.lock" | awk -v p="name = \"$proj\"" '$0==p{f=1; next} f && /^version = "/{gsub(/^version = "|"$/,""); print; exit} /^\[\[package\]\]/{f=0}' ;;
+      proj=$(git show "$1:pyproject.toml" | awk '!f && /^name *= *"/{print; f=1}' | sed -E 's/^name *= *"([^"]*)".*/\1/')
+      git show "$1:uv.lock" | awk -v p="name = \"$proj\"" '$0==p{f=1; next} f && !d && /^version = "/{gsub(/^version = "|"$/,""); print; d=1} /^\[\[package\]\]/{f=0}' ;;
     package-lock.json)
       git cat-file -e "$1:package-lock.json" 2>/dev/null || return 0
-      git show "$1:package-lock.json" | grep -E '"version" *:' | head -1 | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+      git show "$1:package-lock.json" | awk '!f && /"version" *:/{print; f=1}' | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
   esac
 }
 if [ "$(lock_version_at "$M")" = "$V_MAIN" ]; then
@@ -229,11 +233,11 @@ EOF
   for n in $lines; do
     case "$f" in
       uv.lock)
-        proj=$(git show "$C:pyproject.toml" | grep -E '^name *= *"' | head -1 | sed -E 's/^name *= *"([^"]*)".*/\1/')
-        owner=$(git show "$C:uv.lock" | awk -v n="$n" 'NR<n && /^name = "/{nm=$0} NR==n{print nm; exit}')
+        proj=$(git show "$C:pyproject.toml" | awk '!f && /^name *= *"/{print; f=1}' | sed -E 's/^name *= *"([^"]*)".*/\1/')
+        owner=$(git show "$C:uv.lock" | awk -v n="$n" 'NR<n && /^name = "/{nm=$0} NR==n{print nm}')
         [ "$owner" = "name = \"$proj\"" ] || fail "uv.lock: line $n is not in the $proj package block ($owner)" ;;
       package-lock.json)
-        owner=$(git show "$C:package-lock.json" | awk -v n="$n" 'NR<n && /\{[[:space:]]*$/{k=$0} NR==n{print k; exit}')
+        owner=$(git show "$C:package-lock.json" | awk -v n="$n" 'NR<n && /\{[[:space:]]*$/{k=$0} NR==n{print k}')
         case "$owner" in
           '{'|*'"": {'*) ;;
           *) fail "package-lock.json: line $n is not the root package's version ($owner)" ;;
