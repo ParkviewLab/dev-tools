@@ -79,7 +79,9 @@ drop_worktree() {
   if [[ -n "$TMP" ]]; then rm -rf "$TMP"; TMP=""; fi
   git worktree prune >/dev/null 2>&1 || true
 }
-trap drop_worktree EXIT
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/git-back-merge-errors.XXXXXX")"   # gh's error text
+cleanup() { drop_worktree; rm -rf "$SCRATCH"; }
+trap cleanup EXIT
 
 # --- 1. fetch ------------------------------------------------------------------
 git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
@@ -95,7 +97,10 @@ case "$origin_url" in
   git@github.com:*)      SLUG="${origin_url#git@github.com:}" ;;
   https://github.com/*)  SLUG="${origin_url#https://github.com/}" ;;
   ssh://git@github.com/*) SLUG="${origin_url#ssh://git@github.com/}" ;;
-  *) SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "gh cannot name the repository; is gh logged in?" ;;
+  # gh repo view without an argument names gh's base repository, which prefers
+  # a remote named upstream; given origin's URL, it names origin's repository
+  *) SLUG="$(gh repo view "$origin_url" --json nameWithOwner --jq .nameWithOwner 2>/dev/null \
+             || gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "gh cannot name the repository; is gh logged in?" ;;
 esac
 SLUG="${SLUG%.git}"; SLUG="${SLUG%/}"
 export GH_REPO="$SLUG"   # every gh call acts on the repository the pushes go to
@@ -190,6 +195,7 @@ deadline=$(( $(date +%s) + TIMEOUT ))
 while :; do
   pending=""
   if ! RUNS="$(runs_for_tag)"; then
+    if [[ "$DRY" == 1 ]]; then say "(dry run) gh cannot list the workflow runs for $TAG; not waiting"; RUNS=""; break; fi
     (( $(date +%s) < deadline )) || die "gh cannot list the workflow runs for $TAG"
     say "gh cannot list the workflow runs for $TAG; retrying"
     sleep "$POLL"; continue
@@ -290,7 +296,7 @@ fi
 # --- 6. an existing pull request --------------------------------------------------------
 PR_NUM=""; PR_HEAD=""
 # gh pr list --head matches the branch name in forks too; a fork's is never ours
-pr_line="$(gh pr list --head "$BR" --state open --limit 100 --json number,headRefOid,isCrossRepository \
+pr_line="$(gh pr list --head "$BR" --base develop --state open --limit 100 --json number,headRefOid,isCrossRepository \
             --jq '[.[] | select(.isCrossRepository | not)] | .[:1][] | [(.number|tostring), .headRefOid] | @tsv')" \
   || die "gh cannot list the pull requests"
 if [[ -n "$pr_line" ]]; then
@@ -356,12 +362,13 @@ verify_and_push() {  # 9.
   fi
   if [[ "$DRY" == 1 ]]; then return 0; fi
   local old
-  git fetch --quiet origin "+refs/heads/$BR:refs/remotes/origin/$BR" 2>/dev/null || true
-  old="$(git rev-parse -q --verify "refs/remotes/origin/$BR" || true)"
+  old="$(git ls-remote --heads origin "refs/heads/$BR")" || die "cannot read $BR on origin; nothing is pushed"
+  old="${old%%"$TAB"*}"
+  [[ -z "$old" ]] || git fetch --quiet origin "+refs/heads/$BR:refs/remotes/origin/$BR" 2>/dev/null || true
   PREV_HEAD="$old"
   if [[ -n "$old" ]]; then
     git push --quiet --force-with-lease="refs/heads/$BR:$old" origin "$HEAD_SHA:refs/heads/$BR"
-    say "force-pushed $BR (it replaces $(git rev-parse --short "$old"))"
+    say "force-pushed $BR (it replaces ${old:0:7})"
   else
     git push --quiet origin "$HEAD_SHA:refs/heads/$BR"
     say "pushed $BR"
@@ -411,7 +418,7 @@ The version guard examines it in its back-merge mode (back-merge-check, from dev
 else
   say "#$PR_NUM carries $BR"
 fi
-old_prs="$(gh pr list --state open --limit 100 --json number,headRefName,isCrossRepository \
+old_prs="$(gh pr list --base develop --state open --limit 100 --json number,headRefName,isCrossRepository \
             --jq '.[] | select((.isCrossRepository | not) and (.headRefName | startswith("back-merge-v"))) | [(.number|tostring), .headRefName] | @tsv' || true)"
 while IFS="$TAB" read -r n head; do
   [[ -n "$n" && "$head" != "$BR" ]] || continue
@@ -422,30 +429,55 @@ $old_prs
 EOF
 
 # --- 11 and 12. wait for the checks; merge -----------------------------------------------------
-# On an HTTP error gh prints the response body on stdout, so success is read from
-# its exit status. Required checks are listed one per line: a matrix job's name
-# holds a comma.
-if STRICT="$(gh api "repos/$SLUG/branches/develop/protection" --jq '.required_status_checks.strict // false' 2>/dev/null)" \
-   && CONTEXTS="$(gh api "repos/$SLUG/branches/develop/protection" --jq '(.required_status_checks.contexts // [])[]' 2>/dev/null)"; then
-  :
-else
-  STRICT=false; CONTEXTS=""
-  say "develop's protection cannot be read (develop is unprotected, or gh lacks admin rights): waiting for every check reported on #$PR_NUM"
-fi
-wait_for_checks() {  # 11. 0 = the required checks passed on HEAD_SHA; 3 = the head was
-                     # replaced by another push; exits on a failed check or the timeout
-  local deadline out head_now missing bad c b
+# develop's protection, in one read: whether it requires up-to-date branches, then
+# its required checks, one per line (a matrix job's name holds a comma). On an HTTP
+# error gh prints the response body on stdout, so success is read from its exit
+# status; a 404 means develop is unprotected or gh lacks admin rights, and any
+# other failure is retried, since taking it for no protection would merge on
+# whatever checks happened to report.
+read_protection() {
+  local out attempt
+  for attempt in 1 2 3 4 5; do
+    if out="$(gh api "repos/$SLUG/branches/develop/protection" \
+                --jq '(.required_status_checks.strict // false | tostring), ((.required_status_checks.contexts // [])[])' \
+                2>"$SCRATCH/protection")"; then
+      STRICT="${out%%$'\n'*}"
+      if [[ "$out" == *$'\n'* ]]; then CONTEXTS="${out#*$'\n'}"; else CONTEXTS=""; fi
+      return 0
+    fi
+    if grep -F '(HTTP 404)' "$SCRATCH/protection" >/dev/null; then
+      STRICT=false; CONTEXTS=""
+      say "develop's protection cannot be read (develop is unprotected, or gh lacks admin rights): waiting for every check reported on #$PR_NUM"
+      return 0
+    fi
+    say "gh cannot read develop's protection ($(awk 'NR==1' "$SCRATCH/protection")); retrying"
+    sleep "$POLL"
+  done
+  die "gh cannot read develop's protection: $(awk 'NR==1' "$SCRATCH/protection"). #$PR_NUM is left open; run git back-merge again"
+}
+read_protection
+PR_STATE=""
+wait_for_checks() {  # 11. 0 = the required checks passed on HEAD_SHA, or the pull request
+                     # merged; 3 = the head was replaced by another push; 4 = the pull
+                     # request is no longer open (PR_STATE); exits on a failed check or
+                     # the timeout
+  local deadline out line err head_now missing bad c b
   deadline=$(( $(date +%s) + TIMEOUT ))
   while :; do
     missing=""; bad=""
-    if ! head_now="$(gh pr view "$PR_NUM" --json headRefOid --jq .headRefOid)"; then
+    if ! line="$(gh pr view "$PR_NUM" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
       missing=" (gh cannot read #$PR_NUM; retrying)"
+    elif PR_STATE="${line%%"$TAB"*}"; head_now="${line#*"$TAB"}"; [[ "$PR_STATE" != OPEN ]]; then
+      return 4
     elif [[ "$head_now" != "$HEAD_SHA" && "$head_now" != "$PREV_HEAD" ]]; then
       return 3
     elif [[ "$head_now" != "$HEAD_SHA" ]]; then
-      missing="#$PR_NUM's head is not yet $(git rev-parse --short "$HEAD_SHA")"
+      missing=" #$PR_NUM's head is not yet $(git rev-parse --short "$HEAD_SHA")"
     else
-      out="$(gh pr checks "$PR_NUM" --json name,bucket --jq '.[] | [.name, .bucket] | @tsv' 2>/dev/null || true)"
+      out="$(gh pr checks "$PR_NUM" --json name,bucket --jq '.[] | [.name, .bucket] | @tsv' 2>"$SCRATCH/checks" || true)"
+      err="$(awk 'NR==1' "$SCRATCH/checks")"
+      # gh reports no checks as an error; any other error is shown while waiting
+      if [[ -n "$err" && "$err" != *"no checks reported"* ]]; then missing=" (gh pr checks: $err)"; fi
       if [[ -n "$CONTEXTS" ]]; then
         while IFS= read -r c; do
           [[ -n "$c" ]] || continue
@@ -468,7 +500,10 @@ $out
 EOF
       fi
     fi
-    [[ -z "$bad" ]] || die "#$PR_NUM: required checks failed:$bad. The pull request is left open; see its checks, then run git back-merge again"
+    if [[ -n "$bad" ]]; then
+      if landed; then return 0; fi   # merged by another hand all the same
+      die "#$PR_NUM: required checks failed:$bad. The pull request is left open; see its checks, then run git back-merge again"
+    fi
     [[ -n "$missing" ]] || return 0
     (( $(date +%s) < deadline )) || die "timed out waiting for #$PR_NUM's checks:$missing"
     say "waiting for #$PR_NUM:$missing"
@@ -490,6 +525,9 @@ while :; do
   step "11. develop's required checks on #$PR_NUM"
   rc=0; wait_for_checks || rc=$?
   if landed; then say "$TAG has reached origin/develop while the checks ran; #$PR_NUM is not merged again"; break; fi
+  if [[ "$rc" == 4 ]]; then
+    die "#$PR_NUM reads '$PR_STATE', and $TAG is not on origin/develop: the pull request is no longer open and the back-merge has not landed, so nothing is rebuilt. Run git back-merge again, which opens a new pull request"
+  fi
   if [[ "$rc" == 3 ]]; then
     rebuild_again "#$PR_NUM's head was changed outside git back-merge, which alone refreshes $BR"; continue
   fi
@@ -503,18 +541,28 @@ while :; do
   if [[ "$STRICT" == true ]] && ! ancestor origin/develop "$HEAD_SHA"; then
     rebuild_again "develop has moved beyond #$PR_NUM's head"; continue
   fi
+  line="$(gh pr view "$PR_NUM" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv' || true)"
+  if [[ "${line%%"$TAB"*}" == OPEN && "${line#*"$TAB"}" != "$HEAD_SHA" ]]; then
+    rebuild_again "#$PR_NUM's head was changed outside git back-merge before the merge"; continue
+  fi
   die "GitHub refused to merge #$PR_NUM; it is left open"
 done
-state="$(gh pr view "$PR_NUM" --json state --jq .state || true)"
+# exit 0 means the tag is on origin/develop, whatever the state read says
+landed || die "#$PR_NUM's merge was reported, but $TAG is not on origin/develop"
+state=""
+for attempt in 1 2 3; do
+  state="$(gh pr view "$PR_NUM" --json state --jq .state 2>/dev/null)" && break
+  sleep "$POLL"
+done
 if [[ "$state" == MERGED ]]; then
   say "merged #$PR_NUM"
   if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
     git push --quiet origin --delete "$BR" && say "deleted $BR on origin"
   fi
-elif ancestor "$TAGC" origin/develop; then
-  say "#$PR_NUM reads '$state', but $TAG has reached origin/develop by another route; #$PR_NUM and $BR are left for a person to close"
+elif [[ -z "$state" ]]; then
+  say "$TAG has reached origin/develop; #$PR_NUM's state could not be read, so $BR is left on origin"
 else
-  die "#$PR_NUM reads '$state' after the merge, not MERGED"
+  say "#$PR_NUM reads '$state', but $TAG has reached origin/develop by another route; #$PR_NUM and $BR are left for a person to close"
 fi
 
 finish

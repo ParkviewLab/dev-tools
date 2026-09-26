@@ -242,6 +242,17 @@ def pr_by(key):
 
 def pr_view(p):
     head = ref("refs/heads/" + p["head"]) if p["state"] == "OPEN" else p.get("mergedHead") or p.get("closedHead")
+    lag = st.get("view_lag", 0)   # GitHub's reported head lags each push by `lag` reads
+    if lag and p["state"] == "OPEN" and head:
+        if p.get("_live") != head:
+            if p.get("_live"):
+                p["_shown"] = p["_live"]; p["_lag_left"] = lag
+            else:
+                p["_shown"] = head; p["_lag_left"] = 0
+            p["_live"] = head
+        if p.get("_lag_left", 0) > 0:
+            p["_lag_left"] -= 1; st.setdefault("lagged_reads", []).append(p["_shown"][:7])
+            head = p["_shown"]
     if p.get("fork"):
         head = p["forkHead"]   # the branch lives in the fork, not in origin
     return {"number": p["number"], "state": p["state"], "headRefName": p["head"], "headRefOid": head,
@@ -350,8 +361,9 @@ if cmd == ["pr", "create"]:
     head, base = opt("--head"), opt("--base")
     if ref("refs/heads/" + head) is None:
         fail("fake gh: head branch %s is not on origin" % head)
-    if pr_by(head):
-        fail("a pull request for branch %s already exists" % head)
+    if any(p["state"] == "OPEN" and p["head"] == head and p["base"] == base and not p.get("fork")
+           for p in st.get("prs", [])):
+        fail("a pull request for branch %s into %s already exists" % (head, base))
     n = st.get("next_pr", 1); st["next_pr"] = n + 1
     labels = [argv[i + 1] for i, a in enumerate(argv) if a == "--label"]
     for l in labels:
@@ -363,12 +375,16 @@ if cmd == ["pr", "create"]:
     save(); print(url); sys.exit(0)
 
 if cmd == ["pr", "view"]:
+    if opt("--json") == "state" and st.get("fail_state_view"):   # the state read after the merge fails
+        st["fail_state_view"] -= 1; fail("HTTP 502: Bad Gateway")
     p = pr_by(argv[2])
     if p is None:
         fail("no pull requests found for branch \"%s\"" % argv[2])
     emit(pr_view(p))
 
 if cmd == ["pr", "checks"]:
+    if st.get("checks_error"):   # a persistent error, such as a failed authentication
+        fail(st["checks_error"])
     p = pr_by(argv[2]); head = ref("refs/heads/" + p["head"])
     c = st.setdefault("checks", {})
     if c.get("_head") != head:
@@ -381,6 +397,12 @@ if cmd == ["pr", "checks"]:
         push_branch_commit(p["head"], "foreign")   # a push by another hand, or "Update branch"
     if c["_total"] == c.get("merged_by_another_hand_on"):
         merge(p)   # a person presses the merge button while the command polls
+    if c["_total"] == c.get("closed_by_another_hand_on"):
+        p["closedHead"] = ref("refs/heads/" + p["head"]); p["state"] = "CLOSED"   # a person closes it
+    if c["_total"] == c.get("delete_branch_on"):
+        # a person deletes back-merge-<tag> on origin, and GitHub closes the pull request
+        p["closedHead"] = ref("refs/heads/" + p["head"]); p["state"] = "CLOSED"
+        subprocess.run(["git", "--git-dir", ORIGIN, "update-ref", "-d", "refs/heads/" + p["head"]], check=True)
     if c["_polls"] <= c.get("pending_polls", 0):
         emit([{"name": n, "bucket": "pending"} for n in c.get("result", {})])
     emit([{"name": n, "bucket": b} for n, b in c.get("result", {}).items()])
@@ -396,6 +418,9 @@ if cmd == ["pr", "merge"]:
     if st.get("move_develop_before_merge", 0) > 0:
         st["move_develop_before_merge"] -= 1
         push_develop_commit("moved-at-merge")
+    if st.get("push_foreign_before_merge", 0) > 0:   # a push to the branch between the checks and the merge
+        st["push_foreign_before_merge"] -= 1
+        push_branch_commit(p["head"], "foreign-at-merge")
     head = ref("refs/heads/" + p["head"])
     if opt("--match-head-commit") != head:
         fail("Head branch was modified. Review and try the merge again.")

@@ -566,5 +566,135 @@ class Resumption(BackMergeCase):
         self.assertIn("Superseded by #7", old["closeComment"])
 
 
+SHORT = {"GIT_BACK_MERGE_TIMEOUT": "4", "GIT_BACK_MERGE_POLL": "1"}
+
+
+class OtherHands(BackMergeCase):
+    """What a person, another run or a flaky GitHub can do while the command works."""
+
+    def set_checks(self, **checks):
+        st = self.sb.gh_state()
+        st["checks"].update(checks)
+        self.sb.set_gh_state(st)
+
+    def test_a_pull_request_from_the_branch_into_main_is_never_adopted(self):
+        r = self.make("pyproject")
+        r.g("push", "-q", "origin", f"{r.promoted}:refs/heads/back-merge-v0.1.1")
+        st = self.sb.gh_state()
+        st["prs"].append({"number": 3, "head": "back-merge-v0.1.1", "base": "main", "title": "back-merge",
+                          "body": "", "labels": [], "state": "OPEN",
+                          "url": "https://github.com/ParkviewLab/sim/pull/3"})
+        self.sb.set_gh_state(st)
+        main_before = self.origin("rev-parse", "main")
+        self.assertOk(self.back_merge())
+        self.assertEqual(self.origin("rev-parse", "main"), main_before)
+        self.assertTrue(self.is_ancestor(r.tag_commit, "develop"))
+        prs = {p["number"]: p for p in self.sb.gh_state()["prs"]}
+        self.assertEqual((prs[3]["state"], prs[7]["base"], prs[7]["state"]), ("OPEN", "develop", "MERGED"))
+
+    def test_a_pull_request_closed_by_another_hand_stops_the_run(self):
+        self.make("pyproject")
+        self.set_checks(closed_by_another_hand_on=1)
+        result = self.back_merge()
+        self.assertRefused(result, "#7 reads 'CLOSED'")
+        self.assertIn("opens a new pull request", result.stderr)
+        self.assertNoResidue()
+        # a second run opens a new one
+        self.set_checks(closed_by_another_hand_on=None)
+        self.assertOk(self.back_merge())
+        prs = {p["number"]: p["state"] for p in self.sb.gh_state()["prs"]}
+        self.assertEqual(prs, {7: "CLOSED", 8: "MERGED"})
+
+    def test_a_closed_pull_request_is_not_rebuilt_when_develop_moves(self):
+        self.make("pyproject")
+        self.set_checks(closed_by_another_hand_on=1, move_develop_on=[1])
+        result = self.back_merge()
+        self.assertRefused(result, "no longer open")
+        self.assertNotIn("force-pushed", result.stdout)
+        self.assertEqual(self.origin("rev-parse", "back-merge-v0.1.1"), self.sb.gh_state()["prs"][0]["closedHead"])
+
+    def test_a_branch_deleted_on_origin_stops_the_run(self):
+        self.make("pyproject")
+        self.set_checks(delete_branch_on=1, move_develop_on=[1])
+        result = self.back_merge()
+        self.assertRefused(result, "no longer open")
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+    def test_a_push_between_the_checks_and_the_merge_rebuilds(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(push_foreign_before_merge=1)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("changed outside git back-merge before the merge; rebuilding (1 of 3)", result.stdout)
+        self.assertEqual(self.origin("ls-tree", "--name-only", "develop", "foreign-at-merge.txt"), "")
+
+    def test_a_failed_state_read_after_the_merge_is_retried(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(fail_state_view=1)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("merged #7", result.stdout)
+
+    def test_merged_by_another_hand_while_a_check_fails(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(protection=None)
+        st = self.sb.gh_state()
+        st["checks"].update(merged_by_another_hand_on=1, pending_polls=1)
+        st["checks"]["result"]["lint"] = "fail"
+        self.sb.set_gh_state(st)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("has reached origin/develop while the checks ran", result.stdout)
+
+    def test_a_transient_failure_of_the_protection_read_is_retried(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(fail_once=["api repos/ParkviewLab/sim/branches/develop/protection"],
+                                move_develop_before_merge=1)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("gh cannot read develop's protection (HTTP 502: Bad Gateway); retrying", result.stdout)
+        self.assertNotIn("develop is unprotected", result.stdout)
+        self.assertIn("rebuilding (1 of 3)", result.stdout)
+
+    def test_a_persistent_gh_pr_checks_error_is_shown(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(checks_error="HTTP 401: Bad credentials")
+        result = self.back_merge(env=SHORT)
+        self.assertRefused(result, "timed out waiting for #7's checks")
+        self.assertIn("(gh pr checks: HTTP 401: Bad credentials)", result.stdout + result.stderr)
+
+    def test_the_repository_is_named_from_origins_url(self):
+        # gh repo view with no argument would name gh's base repository, which prefers upstream
+        r = self.make("pyproject")
+        self.assertOk(self.back_merge())
+        views = [c for c in self.sb.gh_state()["calls"] if c[:2] == ["repo", "view"]]
+        self.assertEqual(views[0][2], str(r.origin))
+
+    def test_a_lagging_head_is_not_taken_for_a_foreign_push(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(view_lag=2)
+        self.set_checks(move_develop_on=[1])
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertNotIn("outside git back-merge", result.stdout)
+        self.assertTrue(self.sb.gh_state().get("lagged_reads"))
+
+    def test_a_foreign_push_seen_through_a_lagging_head_rebuilds_once(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(view_lag=2)
+        self.set_checks(push_foreign_on=1)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertEqual(result.stdout.count("outside git back-merge"), 1)
+
+    def test_a_dry_run_does_not_wait_on_a_failing_gh(self):
+        self.make("pyproject")
+        self.sb.update_gh_state(fail_once=["run list"])
+        result = self.back_merge("--dry-run", env={"GIT_BACK_MERGE_POLL": "30"})
+        self.assertOk(result)
+        self.assertIn("(dry run) gh cannot list the workflow runs for v0.1.1; not waiting", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
