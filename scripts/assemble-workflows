@@ -33,6 +33,15 @@ slot, so the check can be run anywhere without preparing the repository first:
     workflow = "release"           # or "dev-release", or "both"; default
                                    #   "release"
 
+A pin of a dev-tools release, the `ref:` line of a step that checks out
+ParkviewLab/dev-tools, is the repository's own: the handbook's pin rule (ci.md,
+"Shared dev scripts: `dev-tools`") lets it differ from the part's, since a pin at
+or after its floor is current and the part's pin catches up only at the next
+handbook change. So the check leaves each pin line out of the comparison and
+prints it on a line of its own, for the convention auditor and the release
+preflight to judge by that rule, and the assembly keeps the repository's own pin
+in each job rather than writing the part's.
+
 With `--check` nothing is written: the script compares each workflow with the
 assembly and reports every difference, naming the job it falls in. The blank
 and comment lines that introduce a job count as part of it, so the comment
@@ -60,6 +69,11 @@ FINAL_JOB = {"documents": "documents", "default": "changelog"}
 JOB_RE = re.compile(r"^  ([a-z][a-z0-9_-]*):$", re.M)
 HEAD = "the head"
 WORKFLOW_SCOPES = {"release", "dev-release", "both"}
+PIN_REPOSITORY = "ParkviewLab/dev-tools"
+STEP_RE = re.compile(r"^\s+- ")
+REPOSITORY_RE = re.compile(r"^\s+repository:\s*[\"']?([^\s\"'#]+)[\"']?\s*(#.*)?$")
+REF_RE = re.compile(r"^(\s+ref:\s*)(\S.*?)\s*$")
+PIN_MASK = "<a dev-tools release>"
 
 
 class Error(Exception):
@@ -223,6 +237,76 @@ def job_of(text: str, line_no: int) -> str:
     return job
 
 
+def pins(text: str) -> list[tuple[int, str]]:
+    """(line index, value) of each pin: the `ref:` line of a step that checks out dev-tools."""
+    lines = text.splitlines()
+    found: list[tuple[int, str]] = []
+    step: list[int] = []
+
+    def close_step() -> None:
+        repositories = [REPOSITORY_RE.match(lines[i]) for i in step]
+        if any(m and m.group(1) == PIN_REPOSITORY for m in repositories):
+            for i in step:
+                ref = REF_RE.match(lines[i])
+                if ref:
+                    found.append((i, ref.group(2)))
+
+    for index, line in enumerate(lines):
+        if STEP_RE.match(line) or JOB_RE.match(line) or (line and not line.startswith(" ")):
+            close_step()
+            step = []
+        step.append(index)
+    close_step()
+    return found
+
+
+def pins_by_job(text: str) -> dict[str, list[str]]:
+    """Each job's pins, in the order they appear."""
+    grouped: dict[str, list[str]] = {}
+    for index, value in pins(text):
+        grouped.setdefault(job_of(text, index + 1), []).append(value)
+    return grouped
+
+
+def mask_pins(text: str) -> str:
+    """The text with each pin's value replaced by one placeholder, for the comparison."""
+    lines = text.splitlines(True)
+    for index, _ in pins(text):
+        ending = lines[index][len(lines[index].rstrip("\r\n")):]
+        lines[index] = REF_RE.sub(lambda m: m.group(1) + PIN_MASK, lines[index].rstrip("\r\n")) + ending
+    return "".join(lines)
+
+
+def keep_pins(wanted: str, existing: str) -> tuple[str, list[tuple[str, str, str]]]:
+    """The assembly with the existing workflow's pin in each job put back: (text, [(job, kept, part's)])."""
+    have = pins_by_job(existing)
+    lines = wanted.splitlines(True)
+    seen: dict[str, int] = {}
+    kept: list[tuple[str, str, str]] = []
+    for index, value in pins(wanted):
+        job = job_of(wanted, index + 1)
+        n = seen.get(job, 0)
+        seen[job] = n + 1
+        own = have.get(job, [])
+        if n < len(own) and own[n] != value:
+            ending = lines[index][len(lines[index].rstrip("\r\n")):]
+            lines[index] = REF_RE.sub(lambda m, v=own[n]: m.group(1) + v, lines[index].rstrip("\r\n")) + ending
+            kept.append((job, own[n], value))
+    return "".join(lines), kept
+
+
+def report_pins(name: str, current: str, wanted: str) -> None:
+    """A line for each pin that differs from the part's; the floor rule, not the check, judges it."""
+    wanted_pins = pins_by_job(wanted)
+    for job, values in pins_by_job(current).items():
+        for n, value in enumerate(values):
+            part = wanted_pins.get(job, [])
+            if n < len(part) and part[n] == value:
+                continue
+            names = f" (the part's: {part[n]})" if n < len(part) else ""
+            print(f"{name}: {job}: dev-tools pin {value}{names}; judged by the pin rule, not by this check")
+
+
 def differences(current: str, wanted: str) -> list[tuple[str, str]]:
     """Each hunk of the difference, as (job, text)."""
     out: list[tuple[str, str]] = []
@@ -245,8 +329,12 @@ def check(path: Path, wanted: str, slots: set[str]) -> int:
     if current == wanted:
         print(f"{name}: matches the assembly")
         return 0
+    report_pins(name, current, wanted)
+    if mask_pins(current) == mask_pins(wanted):
+        print(f"{name}: matches the assembly, its dev-tools pins apart")
+        return 0
     undeclared = 0
-    for job, hunk in differences(current, wanted):
+    for job, hunk in differences(mask_pins(current), mask_pins(wanted)):
         if job in slots:
             print(f"{name}: {job}: differs from its part, declared as a slot")
             continue
@@ -291,10 +379,20 @@ def main(argv: list[str] | None = None) -> int:
             status = 1
         return status
 
+    def own_pins(path: Path, text: str) -> str:
+        if not path.exists():
+            return text
+        text, kept = keep_pins(text, path.read_text())
+        for job, own, part_pin in kept:
+            print(f"{path.name}: {job}: kept the repository's dev-tools pin {own} (the part's: {part_pin})")
+        return text
+
     workflows.mkdir(parents=True, exist_ok=True)
+    release = own_pins(workflows / "release.yml", release)
     (workflows / "release.yml").write_text(release)
     print(f"wrote {workflows / 'release.yml'}")
     if dev is not None:
+        dev = own_pins(stale, dev)
         stale.write_text(dev)
         print(f"wrote {stale}")
     elif stale.exists():
