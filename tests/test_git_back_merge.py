@@ -450,6 +450,32 @@ class Conflicts(BackMergeCase):
         result = self.back_merge()
         self.assertRefused(result, "decision 6 (a)")
         self.assertIn("0.1.1.dev1", result.stderr)
+        self.assertIn("a version change reached develop outside the release flow", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+    def test_a_version_change_that_would_merge_cleanly_is_refused_all_the_same(self):
+        # develop set during the release to main's own version: both sides move the
+        # version lines alike, so the plain merge is clean, and step 7 refuses it all
+        # the same, since the change is not the release flow's own; its message
+        # claims no conflict
+        self.make("pyproject")
+        r = self.repo
+        r.g("fetch", "-q", "origin")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, "0.1.1")
+        r.g("commit", "-q", "-am", "chore: set develop's version to 0.1.1")
+        r.g("push", "-q", "origin", "develop")
+        clean = self.sb.run(["git", "merge-tree", "--write-tree", "--no-messages", "origin/develop", "origin/main"],
+                            r.releaser, check=False)
+        self.assertEqual(clean.returncode, 0, "the premise: the plain merge is clean")
+        result = self.back_merge()
+        self.assertRefused(result, "origin/develop's version is 0.1.1, but develop was promoted at 0.1.1.dev0:"
+                                   " a version change reached develop outside the release flow, whether or not"
+                                   " the merge would conflict. Repair it (decision 6 (a) of the real-merges"
+                                   " design): one reviewed commit restoring develop's version lines (the version"
+                                   " file and its lockfile) to 0.1.1.dev0, pushed to develop directly")
+        self.assertNotIn("would conflict on", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertNoResidue()
 

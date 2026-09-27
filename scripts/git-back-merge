@@ -41,10 +41,10 @@
 # the check (exit 2, such as a git before 2.40 where a picked release needs
 # `git merge-tree --merge-base`) is reported as such, with no repair. A shallow
 # repository is refused at step 1, before anything is compared.
-# Step 7, which refuses a version change that reached develop during a
-# promotion, seeks the promotion on the tag's first-parent line as far as
-# origin/develop holds it, which is what the back-merge brings of main's own
-# history, an earlier release's promotion not yet back-merged included, and it
+# Step 7, which refuses a version change that reached develop outside the release
+# flow after a promotion, seeks the promotion on the tag's first-parent line as
+# far as origin/develop holds it, which is what the back-merge brings of main's
+# own history, an earlier release's promotion not yet back-merged included, and it
 # refuses any version difference it finds there, whether or not the merge would
 # conflict. Where develop and main have more than one merge base, the command
 # refuses a picked release whose merge the check does not give, and a promotion
@@ -417,7 +417,7 @@ refuse_version_conflict() {  # 7.
   (( rc <= 1 )) || die "git merge-base failed ($rc)"
   n="$(printf '%s\n' "$bases" | grep -c . || true)"
   [[ "$n" == 1 ]] || die "origin/develop's version is $v_dev, but develop was promoted at $v_promo, and origin/develop and origin/main have $n merge bases, where restoring develop's version lines would be the wrong repair. Its back-merge is the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its one push, the conflict resolved by hand. Nothing is pushed."
-  repair_6a "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop during the release, and the back-merge would conflict on the version line" "$v_promo"
+  repair_6a "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop outside the release flow, whether or not the merge would conflict" "$v_promo"
 }
 picked_merge() {  # 8, for a release picked onto main: prints the merge commit M, whose tree
                   # back-merge-check --merge-tree gives, so that the two apply one rule
