@@ -8,17 +8,19 @@ runs) and a fake GitHub (tests/backmerge_support.py) whose pull-request merge
 really merges into the bare origin's develop. The cases follow the design's
 thirteen steps: the refusal before the switch, the wait for the release and the
 acceptance of a changelog job repaired by hand, resumption, the rebuild when
-develop moves, the two classes of conflict, the three version files, and the
-dry run.
+develop moves, the two classes of conflict, the three version files, the dry
+run, and the back-merge of a release picked onto main (a hotfix).
 """
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import unittest
 from pathlib import Path
 
-from backmerge_support import ReleasedRepo, Sandbox
+from backmerge_support import FIX_LINE_2, ReleasedRepo, Sandbox, rework_line_2, upgrade_twin
 
 RELEASES_MD = """# Versioning & releases
 
@@ -611,6 +613,167 @@ class Resumption(BackMergeCase):
         old = [p for p in self.sb.gh_state()["prs"] if p["number"] == 3][0]
         self.assertEqual(old["state"], "CLOSED")
         self.assertIn("Superseded by #7", old["closeComment"])
+
+
+class PickedReleases(BackMergeCase):
+    """A release picked onto main (a hotfix: the handbook's `git cherry-pick -m 1` of a
+    pull request's merge on develop, then the bump and the tag, with no promotion)
+    goes back into develop through the checked pull request like any other release:
+    step 7 finds no promotion in the release's segment of main, and step 8 makes the
+    merge from the tree that back-merge-check --merge-tree gives."""
+
+    PICKED = "(a release picked onto main: the version lines taken from main)"
+
+    def make_picked(self, kind="pyproject", fix=("fix.txt", "fix\n"), after_fix=None, **kw):
+        r = self.make(kind, **kw)
+        r.land_back_merge()
+        r.hotfix(fix=fix, after_fix=after_fix)
+        self.sb.set_gh_state(r.gh_state())
+        return r
+
+    def subject(self, rev):
+        return self.origin("log", "-1", "--format=%s", rev)
+
+    def blob(self, spec):
+        """A blob's bytes, as git stores them (git's text output would lose a CR)."""
+        return subprocess.run(["git", "cat-file", "blob", spec], cwd=self.repo.origin, env=self.sb.env,
+                              capture_output=True, check=True).stdout
+
+    def assertPicked(self, r, result, placeholder):
+        """The back-merge landed; develop holds the merge M of develop and main, from the
+        picked path, and, in a code repository, the open-cycle commit C on it."""
+        self.assertOk(result)
+        self.assertIn(f"{r.tag3} is a release picked onto main", result.stdout)
+        self.assertIn(self.PICKED, result.stdout)
+        self.assertNotIn("decision 6", self.out(result))
+        tip = self.origin("rev-parse", "develop")
+        self.assertTrue(self.is_ancestor(r.tag3_commit, tip))
+        head = self.origin("rev-parse", tip + "^2")
+        m = self.origin("rev-parse", head + "^") if placeholder else head
+        self.assertEqual(self.subject(m), f"Back-merge: main → develop after {r.tag3}")
+        self.assertEqual(self.origin("log", "-1", "--format=%P", m).split(), [self.origin("rev-parse", tip + "^1"),
+                                                                              r.main_tip])
+        self.assertEqual(r.version_at(m, cwd=r.origin), r.v3)
+        if placeholder:
+            self.assertEqual(self.subject(head), f"chore: open {placeholder} dev cycle")
+        self.assertEqual(r.version_at("develop", cwd=r.origin), placeholder or r.v3)
+        pr = self.sb.gh_state()["prs"][0]
+        self.assertEqual((pr["title"], pr["state"]),
+                         (f"chore(release): back-merge main into develop after {r.tag3}", "MERGED"))
+        self.assertNoResidue()
+        return m, head
+
+    def test_pyproject_with_uv_lock(self):
+        # the lockfile's dependency twin stands at the project's version at the merge
+        # base, and develop has upgraded it since; neither is the project's line
+        r = self.make_picked("pyproject", lock_twin=True, after_fix=upgrade_twin)
+        m, c = self.assertPicked(r, self.back_merge(), "0.1.3.dev0")
+        self.assertEqual(sorted(self.origin("diff", "--name-only", m, c).split()), ["pyproject.toml", "uv.lock"])
+        lock = self.origin("show", "develop:uv.lock")
+        self.assertIn('name = "sim-app"\nversion = "0.1.3.dev0"\n', lock)
+        self.assertIn('name = "twin"\nversion = "0.2.0"\n', lock)
+        self.assertEqual(self.origin("show", "develop:fix.txt"), "fix")
+
+    def test_package_json_with_package_lock_json(self):
+        r = self.make_picked("package", lock_twin=True, after_fix=upgrade_twin)
+        self.assertPicked(r, self.back_merge(), "3.5.3-dev0")
+        lock = json.loads(self.origin("show", "develop:package-lock.json"))
+        self.assertEqual((lock["version"], lock["packages"][""]["version"], lock["packages"]["node_modules/twin"]["version"]),
+                         ("3.5.3-dev0", "3.5.3-dev0", "4.0.0"))
+
+    def test_package_json_with_crlf_line_endings(self):
+        r = self.make_picked("package", crlf=True)
+        self.assertPicked(r, self.back_merge(), "3.5.3-dev0")
+        for name in ("package.json", "package-lock.json"):
+            raw = self.blob(f"develop:{name}")
+            self.assertIn(b'"version": "3.5.3-dev0",\r\n', raw)
+            self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"), name)
+
+    def test_version_txt(self):
+        # only main has changed VERSION.txt since the merge base, so the automatic
+        # merge is clean; step 7 no longer takes v0.23.1's promotion for this release's
+        r = self.make_picked("version-txt")
+        self.assertPicked(r, self.back_merge(), None)
+
+    def test_a_conflict_outside_the_version_lines_is_refused_with_its_repair(self):
+        # the pick changed a line that develop has changed again since
+        self.make_picked("pyproject", fix=FIX_LINE_2, after_fix=rework_line_2)
+        result = self.back_merge()
+        self.assertRefused(result, "conflicts in: app.txt")
+        self.assertIn("decision 6 (d)", result.stderr)
+        self.assertNotIn("decision 6 (a)", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertEqual(self.sb.gh_state()["prs"], [])
+        self.assertNoResidue()
+
+    def test_more_than_one_merge_base_is_refused(self):
+        # v0.1.2 promoted from a develop that did not yet hold v0.1.1's back-merge
+        r = self.make("pyproject")
+        r.g("fetch", "-q", "origin")
+        feature_f = r.g("rev-parse", "origin/develop")
+        r.land_back_merge()
+        r.promote(feature_f, "0.1.2")
+        r.hotfix(version="0.1.3")
+        self.sb.set_gh_state(r.gh_state())
+        result = self.back_merge()
+        self.assertRefused(result, "2 merge bases")
+        self.assertIn("v0.1.3 is a release picked onto main", result.stdout)
+        self.assertNotIn("decision 6", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+    def test_a_dry_run_builds_and_checks_and_pushes_nothing(self):
+        r = self.make_picked("pyproject")
+        before = self.origin("for-each-ref", "--format=%(refname) %(objectname)")
+        result = self.back_merge("--dry-run")
+        self.assertOk(result)
+        self.assertIn(self.PICKED, result.stdout)
+        self.assertIn("PASS", result.stdout)
+        self.assertEqual(self.origin("for-each-ref", "--format=%(refname) %(objectname)"), before)
+        self.assertEqual(self.sb.gh_state()["prs"], [])
+        self.assertNoResidue()
+
+    def test_a_current_open_pull_request_is_resumed(self):
+        r = self.make_picked("pyproject")
+        st = self.sb.gh_state()
+        st["checks"]["result"]["test"] = "fail"
+        self.sb.set_gh_state(st)
+        self.assertRefused(self.back_merge(), "required checks failed: 'test'")
+        head = self.origin("rev-parse", "back-merge-v0.1.2")
+        st = self.sb.gh_state()
+        st["checks"]["result"]["test"] = "pass"
+        self.sb.set_gh_state(st)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("current with origin/develop, and passes the check", result.stdout)
+        self.assertEqual(self.sb.gh_state()["prs"][0]["mergedHead"], head)
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.3.dev0")
+
+    def test_develop_moving_during_the_checks_rebuilds(self):
+        r = self.make_picked("pyproject")
+        st = self.sb.gh_state()
+        st["checks"]["move_develop_on"] = [1]
+        self.sb.set_gh_state(st)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("rebuilding (1 of 3)", result.stdout)
+        self.assertEqual(result.stdout.count(self.PICKED), 2)
+        self.assertEqual(self.origin("show", "develop:moved-1.txt"), "moved-1")
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.3.dev0")
+
+    def test_a_first_release_reached_by_a_fast_forward(self):
+        # no promotion commit, so it counts as picked; the automatic merge is clean,
+        # and the back-merge is what it was
+        r = self.make("pyproject", first_release_by_fast_forward=True)
+        result = self.back_merge()
+        self.assertOk(result)
+        tip = self.origin("rev-parse", "develop")
+        c = self.origin("rev-parse", tip + "^2")
+        self.assertEqual(self.subject(c), "chore: open 0.1.2.dev0 dev cycle")
+        self.assertEqual(self.subject(c + "^"), "Back-merge: main → develop after v0.1.1")
+        self.assertEqual(self.origin("rev-parse", c + "^^2"), r.main_tip)
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
+        self.assertNoResidue()
 
 
 SHORT = {"GIT_BACK_MERGE_TIMEOUT": "4", "GIT_BACK_MERGE_POLL": "1"}

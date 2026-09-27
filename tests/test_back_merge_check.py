@@ -21,19 +21,12 @@ import json
 import re
 import unittest
 
-from backmerge_support import (SCRIPTS, ReleasedRepo, Sandbox, set_package_version, set_pyproject_version,
-                               upgrade_twin)
+from backmerge_support import (FIX_LINE_2, SCRIPTS, ReleasedRepo, Sandbox, rework_line_2, set_package_version,
+                               set_pyproject_version, upgrade_twin)
 
 PASS, FAIL, ERROR = 0, 1, 2
 VERSION_FILES = {"pyproject": ("pyproject.toml", "uv.lock"), "package": ("package.json", "package-lock.json"),
                  "version-txt": ("VERSION.txt",)}
-FIX_LINE_2 = ("app.txt", "line 1\nline 2 (fixed)\nline 3\n")
-
-
-def rework_line_2(repo):
-    """A change merged into develop after the fix, to the line the fix changed."""
-    ReleasedRepo.edit(repo.releaser, "app.txt", "line 1\nline 2 (fixed, then reworked)\nline 3\n")
-    repo.g("commit", "-q", "-am", "feat: rework line 2 (#9)")
 
 
 class CheckCase(unittest.TestCase):
@@ -807,12 +800,7 @@ class PickedRelease(CheckCase):
         g("fetch", "-q", "origin")
         feature_f = g("rev-parse", "origin/develop")
         r.land_back_merge()
-        g("switch", "-q", "main")
-        g("merge", "-q", "--no-ff", feature_f, "-m", "Release: develop → main for v0.1.2")
-        r.set_version(r.releaser, "0.1.2")
-        g("commit", "-q", "-am", "release v0.1.2")
-        g("tag", "-a", "v0.1.2", "-m", "Release v0.1.2")
-        g("push", "-q", "origin", "main", "--follow-tags")
+        r.promote(feature_f, "0.1.2")
         r.hotfix(version="0.1.3")
         g("fetch", "-q", "origin")
         base = g("rev-parse", "origin/develop")
@@ -922,7 +910,8 @@ class FastForwardFirstRelease(CheckCase):
 
 class CopiesAgree(unittest.TestCase):
     """back-merge-check copies _sot.sh's reading at a commit rather than sourcing it
-    (a pin's floor rises only with the pinned script's own file); the copies must agree."""
+    (a pin's floor rises only with the pinned script's own file); the copies must agree.
+    Likewise git-back-merge carries the check's rule for a release picked onto main."""
 
     @staticmethod
     def reading_lines(name):
@@ -931,10 +920,21 @@ class CopiesAgree(unittest.TestCase):
                 if re.match(r"\s+(pyproject|package|version-txt)\)\s+git show", l)
                 or re.match(r"\s+if\s+git cat-file -e|\s+elif git cat-file -e", l)]
 
+    @staticmethod
+    def function(name, fn):
+        text = (SCRIPTS / name).read_text()
+        start = text.index(f"\n{fn}() {{")
+        return text[start:text.index("\n}\n", start) + 3]
+
     def test_version_reading(self):
         ours, theirs = self.reading_lines("back-merge-check"), self.reading_lines("_sot.sh")
         self.assertEqual(len(ours), 6)
         self.assertEqual(ours, theirs)
+
+    def test_the_rule_for_a_release_picked_onto_main(self):
+        ours = self.function("back-merge-check", "release_promotion")
+        self.assertIn("git rev-list --first-parent --merges", ours)
+        self.assertEqual(ours, self.function("git-back-merge", "release_promotion"))
 
 
 if __name__ == "__main__":

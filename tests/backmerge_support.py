@@ -158,6 +158,15 @@ def upgrade_twin(repo: "ReleasedRepo") -> None:
     repo.g("commit", "-q", "-am", "build: upgrade twin (#7)")
 
 
+FIX_LINE_2 = ("app.txt", "line 1\nline 2 (fixed)\nline 3\n")   # a hotfix's fix to line 2 of app.txt
+
+
+def rework_line_2(repo: "ReleasedRepo") -> None:
+    """A change merged into develop after the fix, to the line the fix changed."""
+    ReleasedRepo.edit(repo.releaser, "app.txt", "line 1\nline 2 (fixed, then reworked)\nline 3\n")
+    repo.g("commit", "-q", "-am", "feat: rework line 2 (#9)")
+
+
 def next_placeholder(kind: str, version: str) -> str | None:
     """The next-patch placeholder after a release, as _sot.sh computes it; None for VERSION.txt."""
     x, y, z = version.split(".")
@@ -686,6 +695,21 @@ class ReleasedRepo:
           f"chore(release): back-merge main into develop after {self.tag2} (#{pr})")
         g("push", "-q", "origin", "develop")
         g("branch", "-q", "-D", "landing")
+
+    def promote(self, commit: str, version: str) -> None:
+        """A release by promotion of a develop commit: its merge into main, the bump
+        to version and its tag. Promoting a commit that predates the landed
+        back-merge (land_back_merge()) crosses the two trunks' histories, so that a
+        later back-merge has two merge bases."""
+        g = self.g
+        g("switch", "-q", "main")
+        g("merge", "-q", "--ff-only", "origin/main")
+        g("merge", "-q", "--no-ff", commit, "-m", f"Release: develop → main for v{version}")
+        self.set_version(self.releaser, version)
+        g("commit", "-q", "-am", f"release v{version}")
+        g("tag", "-a", f"v{version}", "-m", f"Release v{version}")
+        g("push", "-q", "origin", "main", "--follow-tags")
+        g("switch", "-q", "develop")
 
     def hotfix(self, version: str | None = None, fix: tuple[str, str] = ("fix.txt", "fix\n"),
                after_fix=None) -> None:

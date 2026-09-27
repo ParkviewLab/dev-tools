@@ -21,7 +21,16 @@
 # checks the result with back-merge-check, pushes it, opens the pull request
 # labelled release-bookkeeping, closes any open back-merge pull request of an
 # older tag, waits for develop's required checks, and merges it with --merge
-# --match-head-commit, never --admin. Each step first tests whether it
+# --match-head-commit, never --admin. A release picked onto main (a hotfix: a
+# pull request picked with `git cherry-pick -m 1`, then bumped and tagged, so that
+# the first-parent segment of main the release adds holds no promotion) has its
+# merge made otherwise: `git commit-tree` of the tree `back-merge-check
+# --merge-tree` gives, which in a code repository is the automatic merge with the
+# project's version lines of develop and the merge base set to main's, since the
+# plain merge conflicts on them by construction; the open-cycle commit follows as
+# for any release. Step 7, which refuses a version change that reached develop
+# during a promotion, seeks the promotion only in the release's own segment of
+# main. Each step first tests whether it
 # has already been done, so a second run after an interruption resumes. A branch
 # that develop has moved beyond is rebuilt from the new develop when a run finds it
 # and, in a repository that requires up-to-date branches, when develop moves while
@@ -327,29 +336,89 @@ else
 fi
 
 # --- 7 to 9. refuse a known conflict, build, verify and push ---------------------------
+# The rule by which a release is picked onto main, in the same text as in
+# back-merge-check (a test holds the two copies equal). A promotion found where
+# there is none would let a version change that reached develop during a
+# promotion pass unseen, so a question git cannot answer returns 2, never
+# "picked".
+release_promotion() {  # $1 = the tag's commit, $2 = develop's side; prints the newest
+                       # merge of the release's first-parent segment of main whose second
+                       # parent is an ancestor of $2 (its promotion), or nothing for a
+                       # release picked onto main; returns 2 where git cannot answer
+  local tags rel line prev="" merges m rc
+  tags=$(git show-ref -d --tags) || return 2
+  rel=$(printf '%s\n' "$tags" | sed 's/\^{}$//' \
+        | awk '$2 ~ /^refs\/tags\/v[0-9]+[.][0-9]+[.][0-9]+$/ {printf " %s", $1} END {printf " "}') || return 2
+  if git rev-parse --verify --quiet "$1^1" >/dev/null; then
+    line=$(git rev-list --first-parent "$1^1") || return 2
+    prev=$(printf '%s\n' "$line" | awk -v rel="$rel" '!f && NF && index(rel, " " $1 " ") {print $1; f=1}') || return 2
+  fi
+  merges=$(git rev-list --first-parent --merges "$1" ${prev:+"^$prev"}) || return 2
+  for m in $merges; do
+    rc=0; git merge-base --is-ancestor "$m^2" "$2" || rc=$?
+    case "$rc" in
+      0) echo "$m"; return 0 ;;
+      1) ;;
+      *) return 2 ;;
+    esac
+  done
+  return 0
+}
+PROMO=""
 refuse_version_conflict() {  # 7.
-  local promo p2 v_promo v_dev
-  promo="$(git rev-list --first-parent --merges -n1 "$TAGC" || true)"
-  [[ -n "$promo" ]] || return 0
-  p2="$(git rev-parse "$promo^2")"
-  ancestor "$p2" origin/develop || return 0
+  local p2 v_promo v_dev
+  # The promotion is sought only in the release's own segment of main: below it lies
+  # the previous release's, which a release picked onto main (a hotfix) would
+  # otherwise be compared with.
+  PROMO="$(release_promotion "$TAGC" origin/develop)" || die "git cannot read the first-parent line of main below $TAG"
+  if [[ -z "$PROMO" ]]; then
+    say "$TAG is a release picked onto main: its segment of main holds no promotion to compare"
+    return 0
+  fi
+  p2="$(git rev-parse "$PROMO^2")"
   v_promo="$(sot_read_at "$p2" "$KIND")"; v_dev="$(sot_read_at origin/develop "$KIND")"
   [[ "$v_promo" == "$v_dev" ]] && return 0
   die "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop during the release, and the back-merge would conflict on the version line. Repair it (decision 6 (a) of the real-merges design): one reviewed commit restoring develop's version lines (the version file and its lockfile) to $v_promo, pushed to develop directly (with enforce_admins switched off and on again where administrators are bound); then run git back-merge again."
 }
+picked_merge() {  # 8, for a release picked onto main: prints the merge commit M, whose tree
+                  # back-merge-check --merge-tree gives, so that the two apply one rule
+  local base main out reason tree
+  base="$(git rev-parse origin/develop)"; main="$(git rev-parse origin/main)"
+  if ! out="$("$CHECK" --merge-tree "$base" origin/main "$TAG" 2>&1)"; then
+    reason="${out##*$'\n'}"; reason="${reason#FAIL: }"; reason="${reason#ERROR: }"
+    case "$reason" in
+      *" conflicts in: "*)
+        die "the merge of origin/main into origin/develop conflicts in: ${reason##*" conflicts in: "}. $TAG is a release picked onto main, whose back-merge takes the project's version lines from main, so the conflict lies elsewhere. Repair it (decision 6 (d) of the real-merges design): an ordinary pull request into develop that brings develop's side of each conflicting passage into agreement with main's; once it has merged, run git back-merge again." ;;
+      *)
+        die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG, a release picked onto main: $reason. Nothing is pushed. It needs a person: the exception for a back-merge that git back-merge refuses is the direct back-merge, with administrators unbound for its one push (ruled on 2026-09-27)." ;;
+    esac
+  fi
+  tree="${out##*$'\n'}"
+  [[ "$(git cat-file -t "$tree" 2>/dev/null)" == tree ]] || die "back-merge-check --merge-tree printed no tree: $tree"
+  git commit-tree "$tree" -p "$base" -p "$main" -m "Back-merge: main → develop after $TAG" \
+    || die "git commit-tree failed; nothing is pushed"
+}
 build() {  # 8.
-  local base files new
+  local base files new m="" how=""
   drop_worktree
   base="$(git rev-parse origin/develop)"
+  if [[ -z "$PROMO" ]]; then
+    m="$(picked_merge)" || exit 1
+    how=" (a release picked onto main: the version lines taken from main)"
+  fi
   TMP="$(mktemp -d "${TMPDIR:-/tmp}/git-back-merge.XXXXXX")"
   WT="$TMP/$BR"
-  git worktree add --quiet --detach "$WT" "$base"
-  if ! out="$(git -C "$WT" merge --quiet --no-ff --no-edit -m "Back-merge: main → develop after $TAG" origin/main 2>&1)"; then
-    files="$(git -C "$WT" diff --name-only --diff-filter=U | tr '\n' ' ')"
-    git -C "$WT" merge --abort >/dev/null 2>&1 || true
-    drop_worktree
-    [[ -n "$files" ]] || die "the merge of origin/main into origin/develop failed: $out"
-    die "the merge of origin/main into origin/develop conflicts in: $files. Repair it (decision 6 (d) of the real-merges design): an ordinary pull request into develop that brings develop's side of each conflicting passage into agreement with main's; once it has merged, run git back-merge again. (A conflict on the version line is decision 6 (a).)"
+  if [[ -n "$m" ]]; then
+    git worktree add --quiet --detach "$WT" "$m"
+  else
+    git worktree add --quiet --detach "$WT" "$base"
+    if ! out="$(git -C "$WT" merge --quiet --no-ff --no-edit -m "Back-merge: main → develop after $TAG" origin/main 2>&1)"; then
+      files="$(git -C "$WT" diff --name-only --diff-filter=U | tr '\n' ' ')"
+      git -C "$WT" merge --abort >/dev/null 2>&1 || true
+      drop_worktree
+      [[ -n "$files" ]] || die "the merge of origin/main into origin/develop failed: $out"
+      die "the merge of origin/main into origin/develop conflicts in: $files. Repair it (decision 6 (d) of the real-merges design): an ordinary pull request into develop that brings develop's side of each conflicting passage into agreement with main's; once it has merged, run git back-merge again. (A conflict on the version line is decision 6 (a).)"
+    fi
   fi
   if [[ "$KIND" != version-txt ]]; then
     new="$(cd "$WT" && sot_dev_version "$V_MAIN" patch)"
@@ -362,7 +431,7 @@ build() {  # 8.
     PLACEHOLDER="$new"
   fi
   HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"
-  say "built $BR at $(git rev-parse --short "$HEAD_SHA") on origin/develop $(git rev-parse --short "$base")"
+  say "built $BR at $(git rev-parse --short "$HEAD_SHA") on origin/develop $(git rev-parse --short "$base")$how"
   git -C "$WT" log --oneline --no-decorate -n "$([[ "$KIND" == version-txt ]] && echo 1 || echo 2)" | sed 's/^/    /'
 }
 verify_and_push() {  # 9.
