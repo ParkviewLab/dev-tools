@@ -231,6 +231,9 @@ if a[:1] == ["run"]:
     if rest[:1] == ["python"]:
         if os.environ.get("FAKE_UV_RUN_LOG"):
             open(os.environ["FAKE_UV_RUN_LOG"], "a").write(" ".join(a[:a.index("python")]) + "\n")
+        if os.environ.get("FAKE_UV_RUN_FAIL"):   # as uv does where it can find or fetch no such Python
+            sys.stderr.write("error: No interpreter found for Python >=3.11 in managed installations or search path\n")
+            sys.exit(2)
         env = dict(os.environ); env.pop("PYTHONPATH", None)
         sys.exit(subprocess.call([sys.executable] + rest[1:], env=env))
 sys.stderr.write("fake uv: unsupported %r\n" % a); sys.exit(2)

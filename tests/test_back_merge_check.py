@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import unittest
 
 from backmerge_support import (FIX_LINE_2, SCRIPTS, ReleasedRepo, Sandbox, rework_line_2, set_package_version,
@@ -1009,6 +1010,29 @@ class ProjectVersion(CheckCase):
         result = self.check(base, self.open_cycle("3.5.2-dev0", trailing_comma), tag="v3.5.1")
         self.assertOutcome(FAIL, result, "cannot read the project's own version of head")
         self.assertIn("cannot be parsed", result.stdout)
+
+    def test_no_parser_for_pyproject_toml_is_an_error(self):
+        # python3 without tomllib, and a uv that can provide no Python 3.11 or later
+        r, base, m = self.build()
+        shadow = self.sb.tmp / "no-tomllib"
+        shadow.mkdir()
+        (shadow / "tomllib.py").write_text("raise ImportError('no tomllib in this Python')\n")
+        env = {"PYTHONPATH": str(shadow), "FAKE_UV_RUN_FAIL": "1"}
+        result = self.check(base, self.open_cycle("0.1.2.dev0"), tag="v0.1.1", env=env)
+        self.assertOutcome(ERROR, result, "uv provides no Python 3.11 or later")
+
+    def test_no_parser_for_package_json_is_an_error(self):
+        # neither python3 nor node on PATH
+        r, base, m = self.build("package")
+        tools = self.sb.tmp / "no-python-no-node"
+        tools.mkdir()
+        for tool in ("bash", "sh", "git", "awk", "sed", "grep", "tr", "wc", "tail", "head", "cmp", "mktemp", "rm",
+                     "cat", "env"):
+            found = shutil.which(tool, path=self.sb.env["PATH"])
+            if found:
+                (tools / tool).symlink_to(found)
+        result = self.check(base, m, tag="v3.5.1", env={"PATH": str(tools)})
+        self.assertOutcome(ERROR, result, "neither python3 nor node")
 
     def test_a_python3_without_tomllib_reads_through_uv(self):
         # a Mac's /usr/bin/python3 is 3.9, without tomllib; a pyproject.toml

@@ -174,10 +174,12 @@ sot_kind_at() {  # $1 = commit; the precedence of dev-tools' _sot.sh
 }
 sot_version_reader() {  # $1 = pyproject | package, $2 = the file, named in a message; reads
                         # the file on standard input and prints the project's own version, or
-                        # fails with a message. pyproject.toml is parsed by python3 where it has
-                        # tomllib (3.11 or later), else by the Python 3.11 or later that uv
-                        # provides, which a pyproject.toml repository requires; package.json by
-                        # python3, else by node, which a package.json repository requires.
+                        # fails with a message: status 1 where the file holds no such version or
+                        # cannot be parsed, 3 where nothing here can parse it. pyproject.toml is
+                        # parsed by python3 where it has tomllib (3.11 or later), else by the
+                        # Python 3.11 or later that uv provides, which a pyproject.toml repository
+                        # requires; package.json by python3, else by node, which a package.json
+                        # repository requires.
   local py='
 import json, sys
 kind, what = sys.argv[1], sys.argv[2]
@@ -197,18 +199,23 @@ except ValueError as error:
 if not isinstance(version, str) or not version:
     sys.exit("%s holds no %s" % (what, missing))
 print(version)'
+  local rc
   if [ "$1" = pyproject ]; then
     if python3 -c 'import tomllib' >/dev/null 2>&1; then python3 -c "$py" "$@"
-    else uv run --no-project --quiet --python '>=3.11' python -c "$py" "$@"; fi
+    elif command -v uv >/dev/null 2>&1; then
+      rc=0; uv run --no-project --quiet --python '>=3.11' python -c "$py" "$@" || rc=$?
+      [ "$rc" -le 1 ] || { echo "$2 cannot be parsed here: uv provides no Python 3.11 or later" >&2; return 3; }
+      return "$rc"
+    else echo "$2 cannot be parsed here: there is no python3 with tomllib (3.11 or later), and no uv" >&2; return 3; fi
   elif command -v python3 >/dev/null 2>&1; then python3 -c "$py" "$@"
-  else
+  elif command -v node >/dev/null 2>&1; then
     node -e 'let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
   const what = process.argv[2]; let doc;
   try { doc = JSON.parse(s); } catch (e) { console.error(what + " cannot be parsed: " + e.message); process.exit(1); }
   const version = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc.version : undefined;
   if (typeof version !== "string" || version === "") { console.error(what + " holds no version at its top level"); process.exit(1); }
   console.log(version); })' "$@"
-  fi
+  else echo "$2 cannot be parsed here: there is neither python3 nor node" >&2; return 3; fi
 }
 version_at() {  # $1 = commit, $2 = kind; prints the project's own version there, or fails
                 # with the reason on standard error (for VERSION.txt, its whitespace removed)
@@ -218,9 +225,13 @@ version_at() {  # $1 = commit, $2 = kind; prints the project's own version there
     version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
   esac
 }
-read_version() {  # $1 = commit, $2 = a name for its reason; prints the project's own version,
-                  # or nothing, the reason left in $TMPD/why-$2
-  version_at "$1" "$KIND" 2>"$TMPD/why-$2" || true
+read_version() {  # $1 = commit, $2 = a name for its reason; sets VERSION to the project's own
+                  # version, or to nothing with the reason left in $TMPD/why-$2; dies where
+                  # nothing here can parse the version file, an error rather than a refusal
+  local rc=0
+  VERSION=$(version_at "$1" "$KIND" 2>"$TMPD/why-$2") || rc=$?
+  [ "$rc" != 3 ] || die "$(tr '\n' ' ' < "$TMPD/why-$2" | sed 's/ *$//')"
+  [ "$rc" = 0 ] || VERSION=""
 }
 no_version() {  # $1 = where, $2 = commit, $3 = the name of its reason; fails with the reason
   local why
@@ -403,7 +414,7 @@ normalised_merge() {  # $1 = develop's side, $2 = main's side; sets NORM to the 
 }
 read_versions() {  # $1 = the commit whose version file sets the kind (the head, or develop)
   KIND=$(sot_kind_at "$1")
-  V_MAIN=$(read_version "$MAIN" main)
+  read_version "$MAIN" main; V_MAIN=$VERSION
   PROJ_MAIN=""
   [ "$KIND" != pyproject ] || PROJ_MAIN=$(project_name_at "$MAIN" || true)
 }
@@ -504,7 +515,8 @@ fi
 
 # --- 4. versions ---
 [ "$KIND" != none ] || die "no version file (pyproject.toml, package.json or VERSION.txt) at head"
-V_M=$(read_version "$M" merge); V_HEAD=$(read_version "$HEAD_SHA" head)
+read_version "$M" merge; V_M=$VERSION
+read_version "$HEAD_SHA" head; V_HEAD=$VERSION
 for pair in "main:$MAIN:$V_MAIN:main" "the merge:$M:$V_M:merge" "head:$HEAD_SHA:$V_HEAD:head"; do
   IFS=: read -r where commit v why <<EOF
 $pair

@@ -53,10 +53,12 @@ sot_kind_at() {  # $1 = commit; echoes pyproject | package | version-txt | none
 
 sot_version_reader() {  # $1 = pyproject | package, $2 = the file, named in a message; reads
                         # the file on standard input and prints the project's own version, or
-                        # fails with a message. pyproject.toml is parsed by python3 where it has
-                        # tomllib (3.11 or later), else by the Python 3.11 or later that uv
-                        # provides, which a pyproject.toml repository requires; package.json by
-                        # python3, else by node, which a package.json repository requires.
+                        # fails with a message: status 1 where the file holds no such version or
+                        # cannot be parsed, 3 where nothing here can parse it. pyproject.toml is
+                        # parsed by python3 where it has tomllib (3.11 or later), else by the
+                        # Python 3.11 or later that uv provides, which a pyproject.toml repository
+                        # requires; package.json by python3, else by node, which a package.json
+                        # repository requires.
   local py='
 import json, sys
 kind, what = sys.argv[1], sys.argv[2]
@@ -76,18 +78,23 @@ except ValueError as error:
 if not isinstance(version, str) or not version:
     sys.exit("%s holds no %s" % (what, missing))
 print(version)'
+  local rc
   if [ "$1" = pyproject ]; then
     if python3 -c 'import tomllib' >/dev/null 2>&1; then python3 -c "$py" "$@"
-    else uv run --no-project --quiet --python '>=3.11' python -c "$py" "$@"; fi
+    elif command -v uv >/dev/null 2>&1; then
+      rc=0; uv run --no-project --quiet --python '>=3.11' python -c "$py" "$@" || rc=$?
+      [ "$rc" -le 1 ] || { echo "$2 cannot be parsed here: uv provides no Python 3.11 or later" >&2; return 3; }
+      return "$rc"
+    else echo "$2 cannot be parsed here: there is no python3 with tomllib (3.11 or later), and no uv" >&2; return 3; fi
   elif command -v python3 >/dev/null 2>&1; then python3 -c "$py" "$@"
-  else
+  elif command -v node >/dev/null 2>&1; then
     node -e 'let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
   const what = process.argv[2]; let doc;
   try { doc = JSON.parse(s); } catch (e) { console.error(what + " cannot be parsed: " + e.message); process.exit(1); }
   const version = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc.version : undefined;
   if (typeof version !== "string" || version === "") { console.error(what + " holds no version at its top level"); process.exit(1); }
   console.log(version); })' "$@"
-  fi
+  else echo "$2 cannot be parsed here: there is neither python3 nor node" >&2; return 3; fi
 }
 
 sot_read_at() {  # $1 = commit, $2 = kind (from sot_kind_at); echoes the project's own version
