@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,8 +72,11 @@ def uv_lock_text(name: str, version: str, bulk: int = 0, twin: str | None = None
         'source = { registry = "https://pypi.org/simple" }\n' for i in range(bulk))
 
 
-def package_json_text(name: str, version: str) -> str:
-    return json.dumps({"name": name, "version": version, "private": True,
+def package_json_text(name: str, version: str, nested_version: bool = False) -> str:
+    # nested_version puts an object holding a "version" of its own before the
+    # top-level one, which is the project's
+    head = {"name": name, **({"config": {"version": "9.9.9"}} if nested_version else {})}
+    return json.dumps({**head, "version": version, "private": True,
                        "dependencies": {"left-pad": "^1.3.0"}}, indent=2) + "\n"
 
 
@@ -96,11 +100,34 @@ def normalised(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def set_project_version_text(text: str, version: str) -> str:
+    """pyproject.toml's text with its [project] table's version set, as uv version writes it."""
+    lines, inside = text.splitlines(keepends=True), False
+    for i, line in enumerate(lines):
+        if line.startswith("["):
+            inside = line.strip() == "[project]"
+        elif inside and line.startswith('version = "'):
+            lines[i] = re.sub(r'^version = "[^"]*"', f'version = "{version}"', line)
+            break
+    return "".join(lines)
+
+
+def project_name_text(text: str) -> str:
+    """The [project] table's name in pyproject.toml's text, as uv reads it."""
+    inside = False
+    for line in text.splitlines():
+        if line.startswith("["):
+            inside = line.strip() == "[project]"
+        elif inside and line.startswith('name = "'):
+            return re.match(r'name = "([^"]*)"', line).group(1)
+    raise ValueError("no name in the [project] table")
+
+
 def set_pyproject_version(wt: Path, version: str, lock: bool = True) -> None:
     p = wt / "pyproject.toml"
     text = p.read_text()
-    name = re.search(r'(?m)^name = "([^"]*)"', text).group(1)
-    p.write_text(re.sub(r'(?m)^version = "[^"]*"', f'version = "{version}"', text, count=1))
+    name = project_name_text(text)
+    p.write_text(set_project_version_text(text, version))
     if lock and (wt / "uv.lock").exists():
         set_uv_lock_version(wt, normalised(name), version)
 
@@ -140,10 +167,50 @@ def set_package_version(wt: Path, version: str, lock: bool = True) -> None:
         write_json(pl, data, "\r\n" in raw)
 
 
+TWIN_UPGRADE = {"pyproject": "0.2.0", "package": "4.0.0"}
+
+
+def upgrade_twin(repo: "ReleasedRepo") -> None:
+    """A change merged into develop that upgrades the dependency named twin in the
+    lockfile (ReleasedRepo's lock_twin), to TWIN_UPGRADE's version."""
+    wt, version = repo.releaser, TWIN_UPGRADE[repo.kind]
+    if repo.kind == "pyproject":
+        set_uv_lock_version(wt, "twin", version)
+    else:
+        pl = wt / "package-lock.json"
+        raw = pl.read_bytes().decode()
+        data = json.loads(raw)
+        data["packages"]["node_modules/twin"]["version"] = version
+        write_json(pl, data, "\r\n" in raw)
+    repo.g("commit", "-q", "-am", "build: upgrade twin (#7)")
+
+
+FIX_LINE_2 = ("app.txt", "line 1\nline 2 (fixed)\nline 3\n")   # a hotfix's fix to line 2 of app.txt
+
+
+def rework_line_2(repo: "ReleasedRepo") -> None:
+    """A change merged into develop after the fix, to the line the fix changed."""
+    ReleasedRepo.edit(repo.releaser, "app.txt", "line 1\nline 2 (fixed, then reworked)\nline 3\n")
+    repo.g("commit", "-q", "-am", "feat: rework line 2 (#9)")
+
+
+def next_placeholder(kind: str, version: str) -> str | None:
+    """The next-patch placeholder after a release, as _sot.sh computes it; None for VERSION.txt."""
+    x, y, z = version.split(".")
+    if kind == "pyproject":
+        return f"{x}.{y}.{int(z) + 1}.dev0"
+    if kind == "package":
+        return f"{x}.{y}.{int(z) + 1}-dev0"
+    return None
+
+
 # ---------------------------------------------------------------- the fakes
 
 FAKE_UV = r'''#!/usr/bin/env python3
-# A fake uv: `uv version <v>` and `uv run --quiet python -c <code>`, all _sot.sh needs.
+# A fake uv: `uv version <v>`, which sets the [project] table's version as uv does,
+# and `uv run [--quiet] [--no-project] [--python <request>] python ...`, all _sot.sh
+# and back-merge-check need; the Python it runs is its own, as uv's would be, so a
+# PYTHONPATH a test sets to shadow tomllib does not reach it.
 import os, re, subprocess, sys
 a = sys.argv[1:]
 if a[:1] == ["version"] and len(a) >= 2:
@@ -151,8 +218,17 @@ if a[:1] == ["version"] and len(a) >= 2:
         open(os.environ["FAKE_UV_LOG"], "a").write("UV_NO_SYNC=%s\n" % os.environ.get("UV_NO_SYNC", ""))
     v = [x for x in a[1:] if not x.startswith("-")][0]
     text = open("pyproject.toml").read()
-    name = re.sub(r"[-_.]+", "-", re.search(r'(?m)^name = "([^"]*)"', text).group(1)).lower()
-    open("pyproject.toml", "w").write(re.sub(r'(?m)^version = "[^"]*"', 'version = "%s"' % v, text, count=1))
+    inside, name = False, None   # the [project] table's name, as uv reads it
+    for l in text.splitlines():
+        if l.startswith("["): inside = l.strip() == "[project]"
+        elif inside and name is None and l.startswith('name = "'): name = re.match(r'name = "([^"]*)"', l).group(1)
+    name = re.sub(r"[-_.]+", "-", name).lower()
+    lines, inside = text.splitlines(True), False
+    for i, l in enumerate(lines):
+        if l.startswith("["): inside = l.strip() == "[project]"
+        elif inside and l.startswith('version = "'):
+            lines[i] = re.sub(r'^version = "[^"]*"', 'version = "%s"' % v, l); break
+    open("pyproject.toml", "w").write("".join(lines))
     if os.path.exists("uv.lock"):
         lines = open("uv.lock").read().splitlines(True); inside = False
         for i, l in enumerate(lines):
@@ -164,9 +240,17 @@ if a[:1] == ["version"] and len(a) >= 2:
         sys.stderr.write("error: Failed to build the project\n"); sys.exit(1)
     sys.exit(0)
 if a[:1] == ["run"]:
-    rest = [x for x in a[1:] if x != "--quiet"]
+    rest = a[1:]
+    while rest and rest[0] in ("--quiet", "--no-project", "--python"):
+        rest = rest[2:] if rest[0] == "--python" else rest[1:]
     if rest[:1] == ["python"]:
-        sys.exit(subprocess.call([sys.executable] + rest[1:]))
+        if os.environ.get("FAKE_UV_RUN_LOG"):
+            open(os.environ["FAKE_UV_RUN_LOG"], "a").write(" ".join(a[:a.index("python")]) + "\n")
+        if os.environ.get("FAKE_UV_RUN_FAIL"):   # as uv does where it can find or fetch no such Python
+            sys.stderr.write("error: No interpreter found for Python >=3.11 in managed installations or search path\n")
+            sys.exit(2)
+        env = dict(os.environ); env.pop("PYTHONPATH", None)
+        sys.exit(subprocess.call([sys.executable] + rest[1:], env=env))
 sys.stderr.write("fake uv: unsupported %r\n" % a); sys.exit(2)
 '''
 
@@ -496,6 +580,22 @@ class Sandbox:
     def cleanup(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def path_with_git_2_39(self) -> str:
+        """A PATH whose git answers `merge-tree --merge-base` as git 2.39 does, which has
+        no such option, and passes every other command to the real git."""
+        wrap = self.tmp / "git-2.39"
+        if not wrap.exists():
+            wrap.mkdir()
+            real = shutil.which("git", path=self.env["PATH"])
+            (wrap / "git").write_text(
+                "#!/bin/sh\n"
+                'for a in "$@"; do\n'
+                '  case "$a" in --merge-base=*) echo "error: unknown option \\`${a#--}\'" >&2; exit 129 ;; esac\n'
+                "done\n"
+                f'exec "{real}" "$@"\n')
+            (wrap / "git").chmod(0o755)
+        return f"{wrap}{os.pathsep}{self.env['PATH']}"
+
     def run(self, args, cwd, env=None, check=True) -> subprocess.CompletedProcess:
         e = dict(self.env)
         if env:
@@ -559,7 +659,15 @@ class ReleasedRepo:
     [project] table. lock_bulk pads the lockfile with that many dependency entries after the
     project's own, to the size of a real one. lock_twin adds a dependency named
     twin whose version is the release's, v2, throughout; lock_project_version=False
-    leaves uv.lock without the project's version.
+    leaves uv.lock without the project's version. package_nested_version puts in
+    package.json an object with a "version" of its own before the top-level one.
+    first_release_by_fast_forward
+    leaves v1 untagged and brings main to develop by a fast-forward rather than a
+    promotion merge, so that v2 is a first release with no promotion commit.
+    early_merge merges into develop, by a real merge, after its dev cycle opened, a
+    pull request's branch cut from the initial commit, before the cycle opened.
+    land_back_merge() then lands v2's back-merge on develop, and hotfix() releases
+    a fix picked onto main after it.
     `releaser` is a clone used to make the history; `dev` is a clone with develop
     checked out, from which git-back-merge is run.
     """
@@ -567,13 +675,17 @@ class ReleasedRepo:
     VERSIONS = {"pyproject": ("0.1.0", "0.1.1", "0.1.2.dev0", "0.1.1.dev0"),
                 "package": ("3.5.0", "3.5.1", "3.5.2-dev0", "3.5.1-dev0"),
                 "version-txt": ("0.23.0", "0.23.1", None, None)}
+    HOTFIX = {"pyproject": "0.1.2", "package": "3.5.2", "version-txt": "0.23.2"}
 
     def __init__(self, sb: Sandbox, kind: str = "pyproject", feature_during_release: bool = True,
                  changelog: bool | None = None, lockfile: bool = True, lock_bulk: int = 0,
                  lock_twin: bool = False, lock_project_version: bool = True,
-                 project_name: str = "sim-app", crlf: bool = False, pyproject_head: str = "") -> None:
+                 project_name: str = "sim-app", crlf: bool = False, pyproject_head: str = "",
+                 first_release_by_fast_forward: bool = False, package_nested_version: bool = False,
+                 early_merge: bool = False) -> None:
         self.sb, self.kind = sb, kind
         self.project_name, self.crlf, self.pyproject_head = project_name, crlf, pyproject_head
+        self.package_nested_version = package_nested_version
         self.lock_bulk, self.lock_twin, self.lock_project_version = lock_bulk, lock_twin, lock_project_version
         self.v1, self.v2, self.placeholder, self.dev1 = self.VERSIONS[kind]
         self.tag1, self.tag2 = "v" + self.v1, "v" + self.v2
@@ -593,12 +705,21 @@ class ReleasedRepo:
         (r / "app.txt").write_text("line 1\nline 2\nline 3\n")
         self.g("add", "-A")
         self.g("commit", "-q", "-m", "chore: initial commit")
-        self.g("tag", "-a", self.tag1, "-m", "Release " + self.tag1)
+        if not first_release_by_fast_forward:
+            self.g("tag", "-a", self.tag1, "-m", "Release " + self.tag1)
         self.g("push", "-q", "origin", "main", "--follow-tags")
         self.g("switch", "-q", "-c", "develop")
         if kind != "version-txt":
             self.set_version(r, self.dev1)
             self.g("commit", "-q", "-am", f"chore: open {self.dev1} dev cycle")
+        if early_merge:
+            self.g("switch", "-q", "-c", "early", "main")
+            self.edit(r, "early.txt", "early\n")
+            self.g("add", "early.txt")
+            self.g("commit", "-q", "-m", "feat: early")
+            self.g("switch", "-q", "develop")
+            self.g("merge", "-q", "--no-ff", "early", "-m", "feat: early (#3)")
+            self.g("branch", "-q", "-D", "early")
         self.g("push", "-q", "-u", "origin", "develop")
         # feature A, merged by pull request (a squash commit, as before the switch)
         self.edit(r, "app.txt", "line 1\nline 2 (feature A)\nline 3\n")
@@ -607,7 +728,10 @@ class ReleasedRepo:
         self.promoted = self.g("rev-parse", "develop")
         # the release: promotion, bump, tag, push; then the changelog job's commit
         self.g("switch", "-q", "main")
-        self.g("merge", "-q", "--no-ff", "develop", "-m", f"Release: develop → main for {self.tag2}")
+        if first_release_by_fast_forward:
+            self.g("merge", "-q", "--ff-only", "develop")
+        else:
+            self.g("merge", "-q", "--no-ff", "develop", "-m", f"Release: develop → main for {self.tag2}")
         self.set_version(r, self.v2)
         self.g("commit", "-q", "-am", f"release {self.tag2}")
         self.g("tag", "-a", self.tag2, "-m", "Release " + self.tag2)
@@ -618,6 +742,8 @@ class ReleasedRepo:
             self.g("commit", "-q", "-am", f"docs(changelog): {self.tag2} [skip ci]", env=BOT)
             self.g("push", "-q", "origin", "main")
         self.main_tip = self.g("rev-parse", "main")
+        # the release gh_state describes; hotfix() makes it the hotfix
+        self.release_tag, self.release_commit = self.tag2, self.tag_commit
         self.g("switch", "-q", "develop")
         if feature_during_release:
             self.edit(r, "other.txt", "feature F\n")
@@ -626,6 +752,94 @@ class ReleasedRepo:
             self.g("push", "-q", "origin", "develop")
         self.dev = sb.tmp / "dev"
         sb.git(sb.tmp, "clone", "-q", "--branch", "develop", str(self.origin), str(self.dev))
+
+    def land_back_merge(self, pr: int = 6) -> None:
+        """Land v2's back-merge on origin's develop in the shape git back-merge and
+        GitHub's merge leave it: the merge M of main into develop, in a code
+        repository the open-cycle commit C on it, and GitHub's merge of the
+        pull request into develop."""
+        g = self.g
+        g("fetch", "-q", "origin")
+        g("switch", "-q", "-C", "landing", "origin/develop")
+        g("merge", "-q", "--no-ff", "origin/main", "-m", f"Back-merge: main → develop after {self.tag2}")
+        if self.placeholder:
+            self.set_version(self.releaser, self.placeholder)
+            g("commit", "-q", "-am", f"chore: open {self.placeholder} dev cycle")
+        head = g("rev-parse", "HEAD")
+        g("switch", "-q", "develop")
+        g("merge", "-q", "--ff-only", "origin/develop")
+        g("merge", "-q", "--no-ff", head, "-m",
+          f"chore(release): back-merge main into develop after {self.tag2} (#{pr})")
+        g("push", "-q", "origin", "develop")
+        g("branch", "-q", "-D", "landing")
+
+    def promote(self, commit: str, version: str) -> None:
+        """A release made by merging a commit into main: the merge, the bump to version,
+        its tag and, where the release writes a changelog, the bot's changelog commit;
+        the release then is the one gh_state describes. Promoting a develop commit that
+        predates the landed back-merge (land_back_merge()), or merging a hotfix branch
+        cut from one, crosses the two trunks' histories, so that the next back-merge
+        has two merge bases."""
+        g = self.g
+        g("switch", "-q", "main")
+        g("merge", "-q", "--ff-only", "origin/main")
+        g("merge", "-q", "--no-ff", commit, "-m", f"Release: develop → main for v{version}")
+        self.set_version(self.releaser, version)
+        g("commit", "-q", "-am", f"release v{version}")
+        g("tag", "-a", f"v{version}", "-m", f"Release v{version}")
+        g("push", "-q", "origin", "main", "--follow-tags")
+        tag_commit = g("rev-parse", f"v{version}^{{commit}}")
+        if self.changelog:
+            self.edit(self.releaser, "CHANGELOG.md", f"# Changelog\n\n## [v{version}]\n- promoted\n")
+            g("commit", "-q", "-am", f"docs(changelog): v{version} [skip ci]", env=BOT)
+            g("push", "-q", "origin", "main")
+        self.main_tip = g("rev-parse", "main")
+        self.release_tag, self.release_commit = f"v{version}", tag_commit
+        g("switch", "-q", "develop")
+
+    def hotfix(self, version: str | None = None, fix: tuple[str, str] = ("fix.txt", "fix\n"),
+               after_fix=None) -> None:
+        """Release a fix picked whole onto main, as the handbook's rule gives it: the
+        fix merged into develop by a real merge, as GitHub makes it; on main,
+        `git cherry-pick -m 1` of that merge, the bump to the hotfix version (HOTFIX,
+        or version), its tag and, where the release writes a changelog, the bot's
+        changelog commit. fix is the file the fix writes and its text; after_fix(repo),
+        if given, adds commits to develop after the fix's merge. Sets v3, tag3,
+        tag3_commit, placeholder3, fix_merge and main_tip, and makes the hotfix the
+        release that gh_state describes."""
+        g = self.g
+        self.v3 = version or self.HOTFIX[self.kind]
+        self.tag3, self.placeholder3 = "v" + self.v3, next_placeholder(self.kind, self.v3)
+        g("fetch", "-q", "origin")
+        g("switch", "-q", "develop")
+        g("merge", "-q", "--ff-only", "origin/develop")
+        g("switch", "-q", "-c", "fix-x")
+        self.edit(self.releaser, fix[0], fix[1])
+        g("add", fix[0])
+        g("commit", "-q", "-m", "fix: x")
+        g("switch", "-q", "develop")
+        g("merge", "-q", "--no-ff", "fix-x", "-m", "fix: x (#8)")
+        g("branch", "-q", "-D", "fix-x")
+        self.fix_merge = g("rev-parse", "HEAD")
+        if after_fix:
+            after_fix(self)
+        g("push", "-q", "origin", "develop")
+        g("switch", "-q", "main")
+        g("merge", "-q", "--ff-only", "origin/main")
+        g("cherry-pick", "-m", "1", self.fix_merge)
+        self.set_version(self.releaser, self.v3)
+        g("commit", "-q", "-am", f"release {self.tag3}")
+        g("tag", "-a", self.tag3, "-m", "Release " + self.tag3)
+        g("push", "-q", "origin", "main", "--follow-tags")
+        self.tag3_commit = g("rev-parse", self.tag3 + "^{commit}")
+        if self.changelog:
+            self.edit(self.releaser, "CHANGELOG.md",
+                      f"# Changelog\n\n## [{self.tag3}]\n- x\n\n## [{self.tag2}]\n- feature A\n")
+            g("commit", "-q", "-am", f"docs(changelog): {self.tag3} [skip ci]", env=BOT)
+            g("push", "-q", "origin", "main")
+        self.main_tip = g("rev-parse", "main")
+        self.release_tag, self.release_commit = self.tag3, self.tag3_commit
+        g("switch", "-q", "develop")
 
     # helpers
     def g(self, *args, env=None) -> str:
@@ -643,7 +857,8 @@ class ReleasedRepo:
                     normalised(self.project_name), version, self.lock_bulk, self.v2 if self.lock_twin else None, self.lock_project_version))
         elif self.kind == "package":
             crlf = (lambda t: t.replace("\n", "\r\n")) if self.crlf else (lambda t: t)
-            (wt / "package.json").write_bytes(crlf(package_json_text("sim-node", version)).encode())
+            (wt / "package.json").write_bytes(crlf(package_json_text(
+                "sim-node", version, self.package_nested_version)).encode())
             if lockfile:
                 (wt / "package-lock.json").write_bytes(crlf(package_lock_text(
                     "sim-node", version, self.lock_bulk, self.v2 if self.lock_twin else None)).encode())
@@ -659,27 +874,28 @@ class ReleasedRepo:
             (wt / "VERSION.txt").write_text(version + "\n")
 
     def version_at(self, rev: str, cwd: Path | None = None) -> str:
+        """The project's own version at rev: [project].version, the top-level version, VERSION.txt."""
         cwd = cwd or self.releaser
         if self.kind == "pyproject":
-            text = self.sb.git(cwd, "show", f"{rev}:pyproject.toml")
-            return re.search(r'(?m)^version = "([^"]*)"', text).group(1)
+            return tomllib.loads(self.sb.git(cwd, "show", f"{rev}:pyproject.toml"))["project"]["version"]
         if self.kind == "package":
             return json.loads(self.sb.git(cwd, "show", f"{rev}:package.json"))["version"]
         return self.sb.git(cwd, "show", f"{rev}:VERSION.txt").strip()
 
     def gh_state(self, **overrides) -> dict:
+        tag, commit = self.release_tag, self.release_commit
         state = {
             "repo": "ParkviewLab/sim", "origin": str(self.origin), "allow_merge_commit": True,
             "protection": {"strict": True, "contexts": ["no-version-change", "test"]},
             "runs": [
-                {"id": 101, "commit": self.tag_commit, "headBranch": self.tag2, "workflowName": "Release",
+                {"id": 101, "commit": commit, "headBranch": tag, "workflowName": "Release",
                  "conclusion": "success",
                  "jobs": [{"name": "gate", "conclusion": "success"},
                           {"name": "changelog" if self.changelog else "release", "conclusion": "success"}]},
-                {"id": 102, "commit": self.tag_commit, "headBranch": "main", "workflowName": "Test",
+                {"id": 102, "commit": commit, "headBranch": "main", "workflowName": "Test",
                  "conclusion": "success", "jobs": [{"name": "test", "conclusion": "success"}]},
             ],
-            "releases": [self.tag2], "labels": [], "prs": [], "next_pr": 7,
+            "releases": list(dict.fromkeys([self.tag2, tag])), "labels": [], "prs": [], "next_pr": 7,
             "checks": {"pending_polls": 1, "result": {"no-version-change": "pass", "test": "pass", "reuse": "pass"}},
         }
         state.update(overrides)

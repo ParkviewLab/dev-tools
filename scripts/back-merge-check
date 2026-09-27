@@ -7,6 +7,7 @@
 # nothing else.
 #
 #   back-merge-check <base> <head> [<main-ref>] [<tag>]
+#   back-merge-check --merge-tree <develop> <main-ref> <tag>
 #
 #   base      develop's commit the pull request is tested against. In a
 #             pull_request job, the first parent of the synthetic merge GitHub
@@ -27,6 +28,20 @@
 #             file (submodule ignore settings do not apply); and main's version must be
 #             the tag's. The version guard's back-merge mode always passes it.
 #
+#   --merge-tree  prints, on its last line, the tree this check accepts for the
+#             merge of a back-merge of <tag> whose parents are <develop> and
+#             main: the automatic merge where it is clean, else, for a release
+#             picked onto main, the merge of condition 3 below; where there is
+#             none it exits 1, its last line giving the reason, which for a
+#             conflict ends " conflicts in: " and the paths; on an error, as
+#             below, it exits 2. git back-merge builds the merge of a release
+#             picked onto main from it, and takes from the reason what it
+#             prescribes: for a version other than the release flow's, the
+#             version the reason names as develop's due, R's next-patch
+#             placeholder, or the merge base's own where that is not a release,
+#             which decision 6 (a)'s repair restores; for a conflict or several
+#             merge bases, the exception ruled on 2026-09-27.
+#
 # `git back-merge` runs this on its own branch before it pushes, and, in a
 # repository that has switched to merge commits, the version guard runs it in its
 # back-merge mode, checked out from dev-tools at a pinned release, so both apply
@@ -37,7 +52,40 @@
 #      and whose parent is M.
 #   2. M has two parents; M^1 is an ancestor of base; M^2 is an ancestor of main.
 #   3. The tree of M equals `git merge-tree --write-tree M^1 M^2`, and that
-#      automatic merge is clean; a hand-resolved merge is refused.
+#      automatic merge is clean; a hand-resolved merge is refused. One case
+#      differs: in tag mode, for a release picked onto main in a repository
+#      whose version is in pyproject.toml or package.json, where that automatic
+#      merge conflicts or differs from M's tree, the tree of M must equal the
+#      automatic merge in which the project's version lines of M^1 and of the
+#      merge base are first set to main's version V, and that merge must be
+#      clean. M^1 and M^2 must then have exactly one merge base MB, which is
+#      tested before the release's promotion is sought, and a history with more
+#      is refused with that reason. Only the version change the release flow
+#      makes is taken from main: MB's version must be a release R, and M^1's
+#      the next-patch placeholder of R that condition 4 computes, which R's
+#      back-merge opened; any other version is refused, named. MB' and D' are MB
+#      and M^1 with those lines rewritten to V and nothing else changed,
+#      built as commits in the object store through a temporary index, touching
+#      no ref, index or working tree; and the merge is `git merge-tree
+#      --write-tree --merge-base=MB' D' M^2`. The lines are exactly those
+#      condition 4 treats as the project's own: the first version line of
+#      pyproject.toml's [project] table; in uv.lock, the first version line of
+#      the [[package]] block named for the project, its [project] table's name
+#      in main's pyproject.toml, normalised as PEP 503 gives it; package.json's
+#      top-level version, recognised only where no nested object precedes it;
+#      and in package-lock.json the root's version and packages[""]'s. Only the
+#      quoted value changes (quote style, spacing, a CR line ending and a
+#      missing last line feed are kept), and a file without such a line is left
+#      as it is.
+#      A release is picked onto main when what the back-merge brings of main's
+#      own history, the tag's first-parent line as far as the base (develop's
+#      tip) holds it, has no merge commit whose second parent the base holds;
+#      where one has, the release was made by promotion, possibly an earlier
+#      release's not yet back-merged, and the automatic merge alone is taken.
+#      The base, not M^1, is develop's side here, so that a head whose merge
+#      has a stale first parent cannot hide a promotion. A first release that
+#      main reached by a fast-forward has no promotion commit on that stretch,
+#      so it counts as picked; the automatic merge, tried first, still passes it.
 #   4. The version at M equals main's. Without C, the head's version equals
 #      main's. C is admitted only where the version file is pyproject.toml or
 #      package.json; a repository whose version is in VERSION.txt skips the open
@@ -48,24 +96,51 @@
 #      (X.Y.(Z+1).dev0 for pyproject.toml, X.Y.(Z+1)-dev0 for package.json); a
 #      lockfile that records the project's version moves with it, and each line
 #      that changes is the project's own: the [project] table's version, the
-#      top-level version of package.json, and in a lockfile the project's entry,
-#      not a dependency's. Neither file may hold a NUL byte, and a submodule's
-#      ignore setting hides no change.
+#      top-level version of package.json (recognised only where no nested object
+#      precedes it, since a line's owner is the last line before it ending in
+#      "{"), and in a lockfile the project's entry, not a dependency's. Neither
+#      file may hold a NUL byte, and a submodule's ignore setting hides no
+#      change.
 #   5. In tag mode, as above.
 #   6. A shallow repository is refused outright.
 #
-# Versions are read from the committed trees, as the version guard reads them.
-# Exit 0 = pass, 1 = not a clean back-merge, 2 = usage or repository error.
-# Portable to bash 3.2 (macOS) and bash 5 (the ubuntu runners). See the
-# handbook's releases.md and ci.md.
+# Versions are the project's own, read from the committed trees: [project].version
+# in pyproject.toml (parsed as TOML) and the top-level "version" in package.json
+# (parsed as JSON), and VERSION.txt with its whitespace stripped. A version file
+# that cannot be parsed, or that holds no such version (a dynamic one, say), fails
+# the check. The project's name, whose
+# [[package]] block in uv.lock holds its locked version, is the [project] table's
+# name, read by the same parser and normalised as PEP 503 gives it. pyproject.toml
+# is parsed by python3 where it has tomllib (3.11 or later), as on the ubuntu
+# runners, else by the Python 3.11 or later that uv provides, which a
+# pyproject.toml repository requires; package.json by python3, else by node;
+# where nothing can parse the file, the check exits 2.
+# Exit 0 = pass, 1 = not a clean back-merge, 2 = usage or repository error (a
+# shallow clone, a git before 2.40 where a release picked onto main needs
+# `git merge-tree --merge-base`, no parser for the version file); with
+# --merge-tree, 0 = the tree is printed, 1 = there is none, 2 = such an error.
+# Portable to bash 3.2 (macOS) and bash 5 (the ubuntu runners). Needs git 2.38
+# or later, for `git merge-tree --write-tree`, and 2.40 or later where a release
+# picked onto main needs its `--merge-base`. See the handbook's releases.md and
+# ci.md.
 
 set -euo pipefail
 export LC_ALL=C   # byte-wise awk comparisons: macOS awk compares strings with strcoll
 
-usage() { echo "usage: back-merge-check <base> <head> [<main-ref>] [<tag>]"; }
+usage() {
+  echo "usage: back-merge-check <base> <head> [<main-ref>] [<tag>]"
+  echo "       back-merge-check --merge-tree <develop> <main-ref> <tag>"
+}
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
-if [ $# -lt 2 ] || [ $# -gt 4 ]; then usage >&2; exit 2; fi
-BASE_IN=$1; HEAD_IN=$2; MAIN_REF=${3:-origin/main}; TAG=${4:-}
+MODE=check
+if [ "${1:-}" = --merge-tree ]; then
+  MODE=merge-tree; shift
+  if [ $# -ne 3 ]; then usage >&2; exit 2; fi
+  DEV_IN=$1; MAIN_REF=$2; TAG=$3
+else
+  if [ $# -lt 2 ] || [ $# -gt 4 ]; then usage >&2; exit 2; fi
+  BASE_IN=$1; HEAD_IN=$2; MAIN_REF=${3:-origin/main}; TAG=${4:-}
+fi
 
 fail() { echo "FAIL: $*"; exit 1; }
 die()  { echo "ERROR: $*" >&2; exit 2; }
@@ -78,8 +153,12 @@ if [ -n "$TAG" ]; then
   echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail "'$TAG' is not a release tag vX.Y.Z"
 fi
 
-BASE=$(git rev-parse --verify --quiet "$BASE_IN^{commit}") || die "base $BASE_IN is not a commit"
-HEAD_SHA=$(git rev-parse --verify --quiet "$HEAD_IN^{commit}") || die "head $HEAD_IN is not a commit"
+if [ "$MODE" = check ]; then
+  BASE=$(git rev-parse --verify --quiet "$BASE_IN^{commit}") || die "base $BASE_IN is not a commit"
+  HEAD_SHA=$(git rev-parse --verify --quiet "$HEAD_IN^{commit}") || die "head $HEAD_IN is not a commit"
+else
+  DEV=$(git rev-parse --verify --quiet "$DEV_IN^{commit}") || die "develop $DEV_IN is not a commit"
+fi
 # A bare name such as origin/main resolves through refs/tags before refs/remotes,
 # so a tag of that name would stand in for main. The remote-tracking branch, then
 # a local branch, is taken, and a name that only a tag carries is refused.
@@ -96,12 +175,15 @@ resolve_main() {  # $1 = main-ref; prints the ref to read main from
 MAIN_FULL=$(resolve_main "$MAIN_REF") || die "main ref $MAIN_REF names a tag, not a branch"
 MAIN=$(git rev-parse --verify --quiet "$MAIN_FULL^{commit}") || die "main ref $MAIN_REF not found"
 short() { git rev-parse --short "$1"; }
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/back-merge-check.XXXXXX") || die "cannot make a temporary directory"
+trap 'rm -rf "$TMPD"' EXIT
+case "$TMPD" in /*) ;; *) TMPD="$PWD/$TMPD" ;; esac   # absolute, for GIT_INDEX_FILE
 
-# --- version reading, from committed trees, as the version guard reads them ---
-# The same reading as _sot.sh's sot_kind_at and sot_read_at, copied rather than
-# sourced: a workflow pin's floor rises only with a change to the pinned script's
-# own file (the handbook's ci.md), so every change to this check's behaviour must
-# be a change to this file.
+# --- version reading, from committed trees ---
+# The same reading as _sot.sh's sot_kind_at, sot_project_reader and sot_read_at,
+# copied rather than sourced: a workflow pin's floor rises only with a change to
+# the pinned script's own file (the handbook's ci.md), so every change to this
+# check's behaviour must be a change to this file; a test holds the copies equal.
 # Every reader in a pipeline here reads to the end of its input. One that stops
 # early (head -1, awk's exit, grep -q) can leave the writer, git show, to die of
 # SIGPIPE once more than a pipe buffer remains, as it does in a real lockfile;
@@ -112,12 +194,77 @@ sot_kind_at() {  # $1 = commit; the precedence of dev-tools' _sot.sh
   elif git cat-file -e "$1:VERSION.txt"    2>/dev/null; then echo version-txt
   else echo none; fi
 }
-version_at() {  # $1 = commit, $2 = kind; prints nothing where there is no version line
+sot_project_reader() {  # $1 = pyproject | package | pyproject-name, $2 = the file, named in a
+                        # message; reads the file on standard input and prints the project's own
+                        # version, or with pyproject-name the [project] table's name normalised as
+                        # PEP 503 gives it (lowercase, each run of - _ . as one -), or fails with a
+                        # message: status 1 where the file holds no such value or cannot be
+                        # parsed, 3 where nothing here can parse it. pyproject.toml is parsed by
+                        # python3 where it has tomllib (3.11 or later), else by the Python 3.11 or
+                        # later that uv provides, which a pyproject.toml repository requires;
+                        # package.json by python3, else by node, which a package.json repository
+                        # requires.
+  local py='
+import json, re, sys
+kind, what = sys.argv[1], sys.argv[2]
+data = sys.stdin.buffer.read()
+try:
+    if kind == "package":
+        doc = json.loads(data)
+        value = doc.get("version") if isinstance(doc, dict) else None
+        missing = "version at its top level"
+    else:
+        import tomllib
+        table = tomllib.loads(data.decode("utf-8")).get("project")
+        key = "name" if kind == "pyproject-name" else "version"
+        value = table.get(key) if isinstance(table, dict) else None
+        missing = "name in its [project] table" if key == "name" else "static version in its [project] table"
+except ValueError as error:
+    sys.exit("%s cannot be parsed: %s" % (what, error))
+if not isinstance(value, str) or not value:
+    sys.exit("%s holds no %s" % (what, missing))
+if kind == "pyproject-name":
+    value = re.sub(r"[-_.]+", "-", value).lower()
+print(value)'
+  local rc
+  if [ "$1" != package ]; then
+    if python3 -c 'import tomllib' >/dev/null 2>&1; then python3 -c "$py" "$@"
+    elif command -v uv >/dev/null 2>&1; then
+      rc=0; uv run --no-project --quiet --python '>=3.11' python -c "$py" "$@" || rc=$?
+      [ "$rc" -le 1 ] || { echo "$2 cannot be parsed here: uv provides no Python 3.11 or later" >&2; return 3; }
+      return "$rc"
+    else echo "$2 cannot be parsed here: there is no python3 with tomllib (3.11 or later), and no uv" >&2; return 3; fi
+  elif command -v python3 >/dev/null 2>&1; then python3 -c "$py" "$@"
+  elif command -v node >/dev/null 2>&1; then
+    node -e 'let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+  const what = process.argv[2]; let doc;
+  try { doc = JSON.parse(s); } catch (e) { console.error(what + " cannot be parsed: " + e.message); process.exit(1); }
+  const version = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc.version : undefined;
+  if (typeof version !== "string" || version === "") { console.error(what + " holds no version at its top level"); process.exit(1); }
+  console.log(version); })' "$@"
+  else echo "$2 cannot be parsed here: there is neither python3 nor node" >&2; return 3; fi
+}
+version_at() {  # $1 = commit, $2 = kind; prints the project's own version there, or fails
+                # with the reason on standard error (for VERSION.txt, its whitespace removed)
   case "$2" in
-    pyproject)   git show "$1:pyproject.toml" | awk '!f && /^version *=/{print; f=1}' | sed -E "s/^version *= *[\"']([^\"']*)[\"'].*/\\1/" ;;
-    package)     git show "$1:package.json" | awk '!f && /"version" *:/{print; f=1}' | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+    pyproject)   git show "$1:pyproject.toml" | sot_project_reader pyproject "pyproject.toml at $1" ;;
+    package)     git show "$1:package.json" | sot_project_reader package "package.json at $1" ;;
     version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
   esac
+}
+read_version() {  # $1 = commit, $2 = a name for its reason; sets VERSION to the project's own
+                  # version, or to nothing with the reason left in $TMPD/why-$2; dies where
+                  # nothing here can parse the version file, an error rather than a refusal
+  local rc=0
+  VERSION=$(version_at "$1" "$KIND" 2>"$TMPD/why-$2") || rc=$?
+  [ "$rc" != 3 ] || die "$(tr '\n' ' ' < "$TMPD/why-$2" | sed 's/ *$//')"
+  [ "$rc" = 0 ] || VERSION=""
+}
+no_version() {  # $1 = where, $2 = commit, $3 = the name of its reason; fails with the reason
+  local why
+  why=$(tr '\n' ' ' < "$TMPD/why-$3" | sed 's/ *$//')
+  [ -n "$why" ] || why="$(version_file "$KIND") at $2 is empty"
+  fail "cannot read the project's own version of $1 ($(short "$2")), which the check reads as the version guard does: $why"
 }
 version_file() {  # $1 = kind; a function, since bash 3.2 misparses a case inside $(...)
   case "$1" in
@@ -138,6 +285,214 @@ EOF
     *)         return 1 ;;
   esac
 }
+project_name_at() {  # $1 = commit; prints the [project] table's name in its pyproject.toml, as
+                     # uv records it (PEP 503), or fails as sot_project_reader does
+  git show "$1:pyproject.toml" | sot_project_reader pyproject-name "pyproject.toml at $1"
+}
+read_name() {  # $1 = commit, $2 = a name for its reason; sets NAME to the project's name, or to
+               # nothing with the reason left in $TMPD/why-$2; dies where nothing can parse it
+  local rc=0
+  NAME=$(project_name_at "$1" 2>"$TMPD/why-$2") || rc=$?
+  [ "$rc" != 3 ] || die "$(tr '\n' ' ' < "$TMPD/why-$2" | sed 's/ *$//')"
+  [ "$rc" = 0 ] || NAME=""
+}
+
+# --- a release picked onto main (condition 3) ---
+# The rule by which a release is picked onto main, in the same text as in
+# git-back-merge (a test holds the two copies equal). What a back-merge brings of
+# main's own history is the tag's first-parent line as far as develop's tip holds
+# it: the release was promoted where a merge on that stretch has a second parent
+# develop holds, and picked onto main where none has. A promotion found where
+# there is none would let a version change that reached develop during a
+# promotion pass unseen, so a question git cannot answer returns 2, never
+# "picked".
+release_promotion() {  # $1 = the tag's commit, $2 = develop's tip; prints the newest merge on
+                       # the tag's first-parent line that $2 does not hold and whose second
+                       # parent it does (the release's promotion), or nothing for a release
+                       # picked onto main; returns 2 where git cannot answer
+  local merges m rc
+  merges=$(git rev-list --first-parent --merges "$1" --not "$2") || return 2
+  for m in $merges; do
+    rc=0; git merge-base --is-ancestor "$m^2" "$2" || rc=$?
+    case "$rc" in
+      0) echo "$m"; return 0 ;;
+      1) ;;
+      *) return 2 ;;
+    esac
+  done
+  return 0
+}
+# The project's version lines of one file, set to V_PICK, the file written to
+# standard output: exactly the lines condition 4 treats as the project's own.
+# Only the quoted value changes; a line whose value is not one quoted string is
+# left as it is, and so is a file without such a line.
+set_version_lines() {  # $1 = the file's path in the repository, $2 = the file
+  local eol
+  eol=$(tail -c1 "$2" | wc -l | tr -d ' ')   # 1 where the file ends with a line feed
+  awk -v kind="$1" -v val="$V_PICK" -v namel="name = \"$PROJ_MAIN\"" -v eol="$eol" -v sq="'" '
+    function key(s) {   # a version line: its key and separator, in RSTART and RLENGTH
+      if (kind ~ /json$/) return match(s, /^[[:space:]]*"version"[[:space:]]*:[[:space:]]*/)
+      return match(s, /^[[:space:]]*"?version"?[[:space:]]*=[[:space:]]*/)
+    }
+    function setval(s,    q, rest, p, v) {   # after key(s): the quoted value set to val
+      q = substr(s, RLENGTH + 1, 1)
+      if (q != "\"" && (q != sq || kind ~ /json$/)) return s
+      rest = substr(s, RLENGTH + 2); p = index(rest, q); v = substr(rest, 1, p - 1)
+      if (p < 2 || index(v, "\"") || index(v, sq)) return s
+      return substr(s, 1, RLENGTH + 1) val substr(rest, p)
+    }
+    { line = $0; t = line; sub(/\r$/, "", t) }
+    kind == "pyproject.toml" {
+      if (t ~ /^\[/) { h = t; sub(/[[:space:]]+$/, "", h); inproj = (h == "[project]") }
+      else if (inproj && !done && key(line)) { line = setval(line); done = 1 }
+    }
+    kind == "uv.lock" {
+      if (t ~ /^\[/) { inpkg = (t == "[[package]]"); own = 0; done = 0 }
+      else if (inpkg && t == namel) own = 1
+      else if (own && !done && key(line)) { line = setval(line); done = 1 }
+    }
+    kind ~ /json$/ {
+      if ((k == "{" || (kind == "package-lock.json" && index(k, "\"\": {"))) && !(owner in seen) && key(line)) {
+        line = setval(line); seen[owner] = 1
+      }
+      if (t ~ /\{[[:space:]]*$/) { k = t; sub(/[[:space:]]+$/, "", k); owner = FNR }
+    }
+    NR > 1 { printf "%s\n", out }
+    { out = line }
+    END { if (NR) { printf "%s", out; if (eol) printf "\n" } }
+  ' "$2"
+}
+tmp_commit() {  # $1 = tree; prints a parentless commit of it, an input to git merge-tree
+                # that no ref names. A fixed identity and date: a CI runner may have no
+                # user configured, and nothing of it is kept.
+  GIT_AUTHOR_NAME=back-merge-check GIT_AUTHOR_EMAIL=back-merge-check@invalid GIT_AUTHOR_DATE='@1000000000 +0000' \
+  GIT_COMMITTER_NAME=back-merge-check GIT_COMMITTER_EMAIL=back-merge-check@invalid GIT_COMMITTER_DATE='@1000000000 +0000' \
+    git commit-tree --no-gpg-sign -m "back-merge-check: the project's version lines set to $V_PICK" "$1"
+}
+normalise() {  # $1 = commit; sets NORMALISED to a commit whose tree is $1's with the
+               # project's version lines set to V_PICK, or to $1 where none changes
+  local f entry mode type oid path new tree changed=0 idx="$TMPD/norm-index"
+  NORMALISED=$1
+  GIT_INDEX_FILE="$idx" git read-tree "$1" || die "git read-tree failed"
+  for f in $VFILES; do
+    entry=$(git ls-tree "$1" -- "$f") || die "git ls-tree failed"
+    [ -n "$entry" ] || continue
+    read -r mode type oid path <<EOF
+$entry
+EOF
+    case "$mode" in 100644|100755) ;; *) continue ;; esac
+    git cat-file blob "$oid" > "$TMPD/norm-in"
+    [ "$(tr -d '\000' < "$TMPD/norm-in" | wc -c)" -eq "$(wc -c < "$TMPD/norm-in")" ] \
+      || fail "$f at $(short "$1"): a NUL byte in the file"
+    set_version_lines "$f" "$TMPD/norm-in" > "$TMPD/norm-out" || die "awk failed setting the version lines of $f"
+    if cmp -s "$TMPD/norm-in" "$TMPD/norm-out"; then continue; fi
+    new=$(git hash-object -w --no-filters --stdin < "$TMPD/norm-out") || die "git hash-object failed"
+    GIT_INDEX_FILE="$idx" git update-index --cacheinfo "$mode,$new,$f" || die "git update-index failed"
+    changed=1
+  done
+  [ "$changed" = 1 ] || return 0
+  tree=$(GIT_INDEX_FILE="$idx" git write-tree) || die "git write-tree failed"
+  NORMALISED=$(tmp_commit "$tree") || die "git commit-tree failed"
+}
+plain_merge() {  # $1, $2 = the two sides; sets AUTO (the tree), AUTO_RC (0 clean, 1 conflicts)
+                 # and AUTO_FILES (the conflicting paths)
+  local out
+  AUTO_RC=0; out=$(git merge-tree --write-tree --no-messages --name-only "$1" "$2") || AUTO_RC=$?
+  [ "$AUTO_RC" -le 1 ] || die "git merge-tree failed ($AUTO_RC)"
+  AUTO=${out%%$'\n'*}
+  AUTO_FILES=$(printf '%s\n' "$out" | sed 1d | tr '\n' ' ' | sed 's/ $//')
+}
+# Condition 3's merge for a release picked onto main. It returns 1 where it does
+# not apply: outside tag mode, where the version is in neither pyproject.toml nor
+# package.json, where the tag is not on main's side, or for a release made by
+# promotion. Otherwise it returns 0, having set NORM to the merge's tree, or
+# NORM_WHY to the reason there is none. Develop and main must have one merge
+# base, which is tested before the promotion is sought: where there are more, the
+# part of main a back-merge brings can hold an earlier release's promotion that
+# develop's version has since moved past, and no version comparison or rewrite
+# against one merge base applies.
+picked_tree() {  # $1 = develop's side, $2 = main's side, $3 = develop's tip (the base)
+  local tagc promo bases rc n vmb want vdev mbp dp out
+  NORM=""; NORM_WHY=""
+  [ -n "$TAG" ] || return 1
+  case "$KIND" in
+    pyproject) VFILES="pyproject.toml uv.lock" ;;
+    package)   VFILES="package.json package-lock.json" ;;
+    *)         return 1 ;;
+  esac
+  [ "$(sot_kind_at "$1")" = "$KIND" ] && [ "$(sot_kind_at "$2")" = "$KIND" ] || return 1
+  tagc=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}") || return 1
+  git merge-base --is-ancestor "$tagc" "$2" || return 1
+  rc=0; bases=$(git merge-base --all "$1" "$2") || rc=$?
+  [ "$rc" -le 1 ] || die "git merge-base failed ($rc)"
+  n=$(printf '%s\n' "$bases" | grep -c . || true)
+  if [ "$n" != 1 ]; then
+    NORM_WHY="develop and main have $n merge bases, and the project's version lines can be set to main's against a single merge base only"
+    return 0
+  fi
+  promo=$(release_promotion "$tagc" "$3") || die "git cannot read the first-parent line of main below $TAG"
+  [ -z "$promo" ] || return 1
+  [ -n "$V_MAIN" ] || no_version main "$MAIN" main
+  [ "v$V_MAIN" = "$TAG" ] || fail "main's version $V_MAIN is not the tag's ($TAG)"
+  V_PICK=$V_MAIN
+  # Only the version change the release flow makes is taken from main: at the
+  # merge base a release R, and on develop R's next-patch placeholder, which R's
+  # back-merge opened. Any other version on either side is refused, named.
+  read_version "$bases" base; vmb=$VERSION
+  if [ -z "$vmb" ]; then
+    NORM_WHY="for a release picked onto main, the merge base's version cannot be read: $(tr '\n' ' ' < "$TMPD/why-base" | sed 's/ *$//')"
+    return 0
+  fi
+  if ! want=$(placeholder_for "$vmb" "$KIND"); then
+    NORM_WHY="for a release picked onto main, the merge base's version must be a release X.Y.Z, and it is $vmb"
+    return 0
+  fi
+  read_version "$1" develop; vdev=$VERSION
+  if [ -z "$vdev" ]; then
+    NORM_WHY="for a release picked onto main, develop's version cannot be read: $(tr '\n' ' ' < "$TMPD/why-develop" | sed 's/ *$//')"
+    return 0
+  fi
+  if [ "$vdev" != "$want" ]; then
+    NORM_WHY="for a release picked onto main, develop's version must be $want, the next-patch placeholder of the merge base's $vmb, and it is $vdev"
+    return 0
+  fi
+  if [ "$KIND" = pyproject ] && [ -z "$PROJ_MAIN" ]; then
+    NORM_WHY="for a release picked onto main, the project's name, which owns its block in uv.lock, cannot be read from main: $(tr '\n' ' ' < "$TMPD/why-name-main" | sed 's/ *$//')"
+    return 0
+  fi
+  normalise "$bases"; mbp=$NORMALISED
+  normalise "$1"; dp=$NORMALISED
+  rc=0; out=$(git merge-tree --write-tree --no-messages --name-only --merge-base="$mbp" "$dp" "$2") || rc=$?
+  [ "$rc" -le 1 ] || die "git merge-tree --merge-base failed ($rc): it needs git 2.40 or later"
+  if [ "$rc" = 1 ]; then
+    NORM_WHY="for a release picked onto main, the merge with the project's version lines set to main's $V_PICK conflicts in: $(printf '%s\n' "$out" | sed 1d | tr '\n' ' ' | sed 's/ $//')"
+    return 0
+  fi
+  NORM=${out%%$'\n'*}
+}
+read_versions() {  # $1 = the commit whose version file sets the kind (the head, or develop)
+  KIND=$(sot_kind_at "$1")
+  read_version "$MAIN" main; V_MAIN=$VERSION
+  PROJ_MAIN=""
+  if [ "$KIND" = pyproject ]; then read_name "$MAIN" name-main; PROJ_MAIN=$NAME; fi
+}
+
+# --- --merge-tree: the tree the check accepts for the merge ---
+if [ "$MODE" = merge-tree ]; then
+  echo "back-merge check --merge-tree: develop $(short "$DEV"), main $(short "$MAIN"), tag $TAG"
+  read_versions "$DEV"
+  plain_merge "$DEV" "$MAIN"
+  if [ "$AUTO_RC" = 0 ]; then
+    ok "the automatic merge of develop and main"
+    echo "$AUTO"; exit 0
+  fi
+  if picked_tree "$DEV" "$MAIN" "$DEV"; then
+    [ -z "$NORM_WHY" ] || fail "$NORM_WHY"
+    ok "the automatic merge with the project's version lines of develop and the merge base set to main's $V_PICK (a release picked onto main)"
+    echo "$NORM"; exit 0
+  fi
+  fail "the automatic merge of develop and main conflicts in: $AUTO_FILES"
+fi
 
 echo "back-merge check: base $(short "$BASE"), head $(short "$HEAD_SHA"), main $(short "$MAIN")${TAG:+, tag $TAG}"
 
@@ -174,16 +529,26 @@ ok "first parent $(short "$P1") is an ancestor of base"
 git merge-base --is-ancestor "$P2" "$MAIN" || fail "second parent $(short "$P2") is not on main"
 ok "second parent $(short "$P2") is an ancestor of main"
 
+# the version kind, main's version and the project's name, which the merge of a
+# release picked onto main needs in condition 3 and condition 4 checks
+read_versions "$HEAD_SHA"
+
 # --- 3. the merge is exactly the automatic merge of its parents ---
-set +e
-MT_OUT=$(git merge-tree --write-tree --no-messages "$P1" "$P2")
-MT_RC=$?
-set -e
-AUTO=${MT_OUT%%$'\n'*}
-[ "$MT_RC" = 0 ] || { [ "$MT_RC" = 1 ] && fail "the automatic merge of the parents conflicts: a hand-resolved back-merge needs a person's review"; die "git merge-tree failed ($MT_RC)"; }
+plain_merge "$P1" "$P2"
 TREE=$(git rev-parse "$M^{tree}")
-[ "$AUTO" = "$TREE" ] || fail "tree of $(short "$M") differs from the automatic merge of its parents: $(git diff --stat "$AUTO" "$TREE" | tail -1)"
-ok "tree of the merge equals the automatic merge ($(git rev-parse --short "$TREE"))"
+if [ "$AUTO_RC" = 0 ] && [ "$AUTO" = "$TREE" ]; then
+  ok "tree of the merge equals the automatic merge ($(git rev-parse --short "$TREE"))"
+elif picked_tree "$P1" "$P2" "$BASE"; then
+  if [ -n "$NORM_WHY" ]; then
+    if [ "$AUTO_RC" = 1 ]; then fail "the automatic merge of the parents conflicts; $NORM_WHY: a hand-resolved back-merge needs a person's review"; fi
+    fail "tree of $(short "$M") differs from the automatic merge of its parents; $NORM_WHY"
+  fi
+  [ "$NORM" = "$TREE" ] || fail "tree of $(short "$M") differs from the automatic merge with the project's version lines of develop and the merge base set to main's $V_PICK (a release picked onto main): $(git diff --stat "$NORM" "$TREE" | tail -1)"
+  ok "tree of the merge equals the automatic merge with the project's version lines of develop and the merge base set to main's $V_PICK (a release picked onto main)"
+else
+  [ "$AUTO_RC" = 0 ] || fail "the automatic merge of the parents conflicts: a hand-resolved back-merge needs a person's review"
+  fail "tree of $(short "$M") differs from the automatic merge of its parents: $(git diff --stat "$AUTO" "$TREE" | tail -1)"
+fi
 
 # --- 5. tag mode: everything brought from main is released ---
 if [ -n "$TAG" ]; then
@@ -205,14 +570,14 @@ if [ -n "$TAG" ]; then
 fi
 
 # --- 4. versions ---
-KIND=$(sot_kind_at "$HEAD_SHA")
 [ "$KIND" != none ] || die "no version file (pyproject.toml, package.json or VERSION.txt) at head"
-V_MAIN=$(version_at "$MAIN" "$KIND" || true); V_M=$(version_at "$M" "$KIND" || true); V_HEAD=$(version_at "$HEAD_SHA" "$KIND" || true)
-for pair in "main:$MAIN:$V_MAIN" "the merge:$M:$V_M" "head:$HEAD_SHA:$V_HEAD"; do
-  IFS=: read -r where commit v <<EOF
+read_version "$M" merge; V_M=$VERSION
+read_version "$HEAD_SHA" head; V_HEAD=$VERSION
+for pair in "main:$MAIN:$V_MAIN:main" "the merge:$M:$V_M:merge" "head:$HEAD_SHA:$V_HEAD:head"; do
+  IFS=: read -r where commit v why <<EOF
 $pair
 EOF
-  [ -n "$v" ] || fail "no version line in $where's $(version_file "$KIND") ($(short "$commit")); the check reads the first version line, as the version guard does"
+  [ -n "$v" ] || no_version "$where" "$commit" "$why"
 done
 if [ -n "$TAG" ]; then
   [ "v$V_MAIN" = "$TAG" ] || fail "main's version $V_MAIN is not the tag's ($TAG)"
@@ -233,14 +598,11 @@ case "$KIND" in
   pyproject) SOT=pyproject.toml; LOCK=uv.lock ;;
   package)   SOT=package.json;   LOCK=package-lock.json ;;
 esac
-TMPD=$(mktemp -d "${TMPDIR:-/tmp}/back-merge-check.XXXXXX")
-trap 'rm -rf "$TMPD"' EXIT
-# the project's name, which owns its lines in uv.lock
+# the project's name, the [project] table's, which owns its lines in uv.lock
 PROJ=""
 if [ "$KIND" = pyproject ]; then
-  # uv records the normalised name (PEP 503): lowercase, each run of - _ . as -
-  PROJ=$(git show "$C:pyproject.toml" | awk '!f && /^name *=/{print; f=1}' | sed -E "s/^name *= *[\"']([^\"']*)[\"'].*/\\1/" \
-         | tr 'A-Z' 'a-z' | sed -E 's/[-_.]+/-/g')
+  read_name "$C" name-head; PROJ=$NAME
+  [ -n "$PROJ" ] || fail "cannot read the project's name at head ($(short "$C")): $(tr '\n' ' ' < "$TMPD/why-name-head" | sed 's/ *$//')"
 fi
 # The open-cycle commit's changes are compared blob to blob, line by line: a
 # version change adds and removes no line, so the lines of the two blobs pair by

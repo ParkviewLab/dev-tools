@@ -30,15 +30,20 @@ sot_read() {  # echoes the current version
 }
 
 # --- detection and read at a commit ------------------------------------------
-# From a committed tree rather than the working tree, read as the version guard
-# reads it (the first `version` line), so that git-back-merge can read origin/main
-# and origin/develop without checking them out. back-merge-check carries its own
-# copy rather than sourcing this file: a workflow pin's floor rises only with a
-# change to the pinned script's own file (the handbook's ci.md), so a change to
-# the check's behaviour must be a change to scripts/back-merge-check. The two
-# copies are kept equal by hand. Each reader in these pipelines reads
-# to the end of its input: one that stops early (head -1, awk's exit) can leave
-# git show to die of SIGPIPE, and under pipefail the pipeline then fails.
+# From a committed tree rather than the working tree, so that git-back-merge can
+# read origin/main and origin/develop without checking them out; read as sot_read
+# reads the working tree: the project's own
+# version, [project].version in pyproject.toml (parsed as TOML) and the top-level
+# "version" in package.json (parsed as JSON), and VERSION.txt with its whitespace
+# removed. A file that cannot be parsed, or that holds no such version (a dynamic
+# one, say), is an error, with a message on standard error. back-merge-check
+# carries its own copy rather than sourcing this file: a workflow pin's floor
+# rises only with a change to the pinned script's own file (the handbook's
+# ci.md), so a change to the check's behaviour must be a change to
+# scripts/back-merge-check. The two copies are kept equal by hand, and a test
+# holds them equal. Each reader in these pipelines reads to the end of its input:
+# one that stops early (head -1, awk's exit) can leave git show to die of SIGPIPE,
+# and under pipefail the pipeline then fails.
 sot_kind_at() {  # $1 = commit; echoes pyproject | package | version-txt | none
   if   git cat-file -e "$1:pyproject.toml" 2>/dev/null; then echo pyproject
   elif git cat-file -e "$1:package.json"   2>/dev/null; then echo package
@@ -46,10 +51,62 @@ sot_kind_at() {  # $1 = commit; echoes pyproject | package | version-txt | none
   else echo none; fi
 }
 
-sot_read_at() {  # $1 = commit, $2 = kind (from sot_kind_at); echoes the version there
+sot_project_reader() {  # $1 = pyproject | package | pyproject-name, $2 = the file, named in a
+                        # message; reads the file on standard input and prints the project's own
+                        # version, or with pyproject-name the [project] table's name normalised as
+                        # PEP 503 gives it (lowercase, each run of - _ . as one -), or fails with a
+                        # message: status 1 where the file holds no such value or cannot be
+                        # parsed, 3 where nothing here can parse it. pyproject.toml is parsed by
+                        # python3 where it has tomllib (3.11 or later), else by the Python 3.11 or
+                        # later that uv provides, which a pyproject.toml repository requires;
+                        # package.json by python3, else by node, which a package.json repository
+                        # requires.
+  local py='
+import json, re, sys
+kind, what = sys.argv[1], sys.argv[2]
+data = sys.stdin.buffer.read()
+try:
+    if kind == "package":
+        doc = json.loads(data)
+        value = doc.get("version") if isinstance(doc, dict) else None
+        missing = "version at its top level"
+    else:
+        import tomllib
+        table = tomllib.loads(data.decode("utf-8")).get("project")
+        key = "name" if kind == "pyproject-name" else "version"
+        value = table.get(key) if isinstance(table, dict) else None
+        missing = "name in its [project] table" if key == "name" else "static version in its [project] table"
+except ValueError as error:
+    sys.exit("%s cannot be parsed: %s" % (what, error))
+if not isinstance(value, str) or not value:
+    sys.exit("%s holds no %s" % (what, missing))
+if kind == "pyproject-name":
+    value = re.sub(r"[-_.]+", "-", value).lower()
+print(value)'
+  local rc
+  if [ "$1" != package ]; then
+    if python3 -c 'import tomllib' >/dev/null 2>&1; then python3 -c "$py" "$@"
+    elif command -v uv >/dev/null 2>&1; then
+      rc=0; uv run --no-project --quiet --python '>=3.11' python -c "$py" "$@" || rc=$?
+      [ "$rc" -le 1 ] || { echo "$2 cannot be parsed here: uv provides no Python 3.11 or later" >&2; return 3; }
+      return "$rc"
+    else echo "$2 cannot be parsed here: there is no python3 with tomllib (3.11 or later), and no uv" >&2; return 3; fi
+  elif command -v python3 >/dev/null 2>&1; then python3 -c "$py" "$@"
+  elif command -v node >/dev/null 2>&1; then
+    node -e 'let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+  const what = process.argv[2]; let doc;
+  try { doc = JSON.parse(s); } catch (e) { console.error(what + " cannot be parsed: " + e.message); process.exit(1); }
+  const version = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc.version : undefined;
+  if (typeof version !== "string" || version === "") { console.error(what + " holds no version at its top level"); process.exit(1); }
+  console.log(version); })' "$@"
+  else echo "$2 cannot be parsed here: there is neither python3 nor node" >&2; return 3; fi
+}
+
+sot_read_at() {  # $1 = commit, $2 = kind (from sot_kind_at); echoes the project's own version
+                 # there, or fails with a message
   case "$2" in
-    pyproject)   git show "$1:pyproject.toml" | awk '!f && /^version *=/{print; f=1}' | sed -E "s/^version *= *[\"']([^\"']*)[\"'].*/\\1/" ;;
-    package)     git show "$1:package.json" | awk '!f && /"version" *:/{print; f=1}' | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+    pyproject)   git show "$1:pyproject.toml" | sot_project_reader pyproject "pyproject.toml at $1" ;;
+    package)     git show "$1:package.json" | sot_project_reader package "package.json at $1" ;;
     version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
   esac
 }
