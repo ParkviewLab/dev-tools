@@ -869,6 +869,13 @@ class PickedRelease(CheckCase):
         self.assertEqual((g("for-each-ref"), g("status", "--porcelain", "--untracked-files=all"),
                           g("rev-parse", "HEAD")), before)
 
+    def test_a_git_without_merge_tree_merge_base_is_an_error(self):
+        r, base = self.build("pyproject")
+        m = self.merge()
+        env = {"PATH": self.sb.path_with_git_2_39()}
+        self.assertOutcome(ERROR, self.merge_tree(base, "v0.1.2", env=env), "git 2.40 or later")
+        self.assertOutcome(ERROR, self.check(base, m, tag="v0.1.2", env=env), "git 2.40 or later")
+
     def test_merge_tree_usage(self):
         r, base = self.build("version-txt")
         self.assertOutcome(ERROR, self.sb.script("back-merge-check", "--merge-tree", base, "origin/main",

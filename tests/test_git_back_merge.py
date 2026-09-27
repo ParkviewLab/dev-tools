@@ -751,6 +751,17 @@ class PickedReleases(BackMergeCase):
         self.assertIn("conflicts in: app.txt", result.stderr)
         self.assertTheException(result)
 
+    def test_an_error_of_the_check_is_reported_with_no_repair(self):
+        # a git before 2.40 has no merge-tree --merge-base, so back-merge-check
+        # --merge-tree exits 2: an error, which no repair of the history mends
+        self.make_picked("pyproject")
+        result = self.back_merge("--dry-run", env={"PATH": self.sb.path_with_git_2_39()})
+        self.assertRefused(result, "back-merge-check --merge-tree could not run (exit 2)")
+        self.assertIn("git 2.40 or later", result.stderr)
+        self.assertNotIn("the direct back-merge", result.stderr)
+        self.assertNotIn("decision 6", result.stderr)
+        self.assertNoResidue()
+
     def test_a_conflict_in_a_version_txt_repository_is_refused_with_the_exception(self):
         self.make_picked("version-txt", fix=FIX_LINE_2, after_fix=rework_line_2)
         result = self.back_merge()

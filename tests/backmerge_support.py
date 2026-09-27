@@ -562,6 +562,22 @@ class Sandbox:
     def cleanup(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def path_with_git_2_39(self) -> str:
+        """A PATH whose git answers `merge-tree --merge-base` as git 2.39 does, which has
+        no such option, and passes every other command to the real git."""
+        wrap = self.tmp / "git-2.39"
+        if not wrap.exists():
+            wrap.mkdir()
+            real = shutil.which("git", path=self.env["PATH"])
+            (wrap / "git").write_text(
+                "#!/bin/sh\n"
+                'for a in "$@"; do\n'
+                '  case "$a" in --merge-base=*) echo "error: unknown option \\`${a#--}\'" >&2; exit 129 ;; esac\n'
+                "done\n"
+                f'exec "{real}" "$@"\n')
+            (wrap / "git").chmod(0o755)
+        return f"{wrap}{os.pathsep}{self.env['PATH']}"
+
     def run(self, args, cwd, env=None, check=True) -> subprocess.CompletedProcess:
         e = dict(self.env)
         if env:

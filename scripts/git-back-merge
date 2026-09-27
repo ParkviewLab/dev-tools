@@ -392,10 +392,14 @@ refuse_version_conflict() {  # 7.
 }
 picked_merge() {  # 8, for a release picked onto main: prints the merge commit M, whose tree
                   # back-merge-check --merge-tree gives, so that the two apply one rule
-  local base main out reason tree
+  local base main out rc reason tree
   base="$(git rev-parse origin/develop)"; main="$(git rev-parse origin/main)"
-  if ! out="$("$CHECK" --merge-tree "$base" origin/main "$TAG" 2>&1)"; then
+  rc=0; out="$("$CHECK" --merge-tree "$base" origin/main "$TAG" 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]]; then
     reason="${out##*$'\n'}"; reason="${reason#FAIL: }"; reason="${reason#ERROR: }"
+    # Exit 2 is an error of the check (a git before 2.40, a shallow clone), not a
+    # refusal of the back-merge, and no repair of the history mends it.
+    [[ "$rc" == 1 ]] || die "back-merge-check --merge-tree could not run (exit $rc): $reason. Nothing is pushed."
     case "$reason" in
       *" conflicts in: "*)
         # Decision 6 (d)'s repair brings develop's side of each conflicting passage

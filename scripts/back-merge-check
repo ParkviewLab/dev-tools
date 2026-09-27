@@ -394,7 +394,7 @@ normalised_merge() {  # $1 = develop's side, $2 = main's side; sets NORM to the 
   normalise "$bases"; mbp=$NORMALISED
   normalise "$1"; dp=$NORMALISED
   rc=0; out=$(git merge-tree --write-tree --no-messages --name-only --merge-base="$mbp" "$dp" "$2") || rc=$?
-  [ "$rc" -le 1 ] || die "git merge-tree failed ($rc)"
+  [ "$rc" -le 1 ] || die "git merge-tree --merge-base failed ($rc): it needs git 2.40 or later"
   if [ "$rc" = 1 ]; then
     NORM_WHY="the merge with the project's version lines set to main's $V_PICK conflicts in: $(printf '%s\n' "$out" | sed 1d | tr '\n' ' ' | sed 's/ $//')"
     return 0
