@@ -142,9 +142,12 @@ handbook_dir() {
 # The handbook's releases.md gives the release's end for a repository that has not
 # switched in the section headed "Until a repository has switched"; its heading is
 # the contract between the two repositories. Until that section is released, the
-# section "After the release" gives the direct back-merge, and is quoted only while
-# it still does.
+# section as handbook v0.27.0 released it gives the direct back-merge; it is found
+# by that heading exactly, and quoted only while it still gives it. No other
+# heading stands in for it: the section that replaced it describes the back-merge
+# pull request, and its text names `merge --no-ff` as well.
 TRANSITION_HEADING="## Until a repository has switched"
+CASCADE_HEADING="## After the release: the back-merge cascade (mandatory)"
 section() {  # $1 = file, $2 = heading line; prints that section, heading included
   awk -v h="$2" '$0==h{p=1; print; next} p && /^## /{exit} p{print}' "$1"
 }
@@ -155,7 +158,7 @@ quote_transition() {  # the released handbook's text for a repository not yet sw
   if [[ ! -f "$f" ]]; then echo "  $url"; return; fi
   heading="$(awk -v h="$TRANSITION_HEADING" '!f && $0==h{print; f=1}' "$f")"
   if [[ -z "$heading" ]]; then
-    heading="$(awk '!f && /^## After the release/{print; f=1}' "$f")"
+    heading="$(awk -v h="$CASCADE_HEADING" '!f && $0==h{print; f=1}' "$f")"
     if [[ -n "$heading" ]] && ! section "$f" "$heading" | grep -F 'merge --no-ff' >/dev/null; then heading=""; fi
   fi
   if [[ -z "$heading" ]]; then echo "  $f (or $url): the section \"${TRANSITION_HEADING#"## "}\""; return; fi

@@ -50,6 +50,16 @@ RELEASES_MD_TRANSITION = RELEASES_MD.replace(
     "## Until a repository has switched\n\nThe direct back-merge: git merge --no-ff main, then git dev-release --open."
     "\n\n## Development versioning")
 RELEASES_MD_RENAMED_ONLY = RELEASES_MD_TRANSITION.split("## Until a repository has switched")[0] + "## Development versioning\n"
+# releases.md with the back-merge pull request's section, whose text names
+# `git merge --no-ff` too, and no transition section: under the name the section
+# first had and under the one it has now, it never gives the direct back-merge.
+RELEASES_MD_PR_SECTION = RELEASES_MD.replace(
+    "## After the release: the back-merge cascade (mandatory)\n\nMerge main into develop and push:\n\n"
+    "    git -C ../<repo>-develop merge --no-ff main\n",
+    "## After the release: the back-merge pull request\n\nRun git back-merge, which builds the branch with"
+    " `git merge --no-ff origin/main`.\n")
+RELEASES_MD_LAST_STEP = RELEASES_MD_PR_SECTION.replace(
+    "## After the release: the back-merge pull request", "## The release's last step: the back-merge pull request")
 
 
 class BackMergeCase(unittest.TestCase):
@@ -405,6 +415,18 @@ class TheRelease(BackMergeCase):
         result = self.back_merge()
         self.assertRefused(result, 'the section "Until a repository has switched"')
         self.assertNotIn("Run git back-merge", result.stderr)
+
+    def test_not_switched_never_quotes_the_pull_request_section(self):
+        # only the heading handbook v0.27.0 released, matched exactly, is the
+        # direct back-merge's
+        self.make("pyproject")
+        self.sb.update_gh_state(allow_merge_commit=False)
+        for text in (RELEASES_MD_PR_SECTION, RELEASES_MD_LAST_STEP):
+            (self.handbook / "docs" / "releases.md").write_text(text)
+            result = self.back_merge()
+            self.assertRefused(result, 'the section "Until a repository has switched"')
+            self.assertNotIn("back-merge pull request", result.stderr)
+            self.assertNotIn("merge --no-ff origin/main", result.stderr)
 
     def test_an_unreadable_merge_setting_is_not_taken_for_not_switched(self):
         # GitHub returns allow_merge_commit only to a caller with admin rights
