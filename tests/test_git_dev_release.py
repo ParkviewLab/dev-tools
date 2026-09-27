@@ -177,6 +177,14 @@ class AfterTheSwitch(DevReleaseCase):
         self.make(workflow=WF_KIND_NESTED, allow_merge_commit=True)
         self.assertRefused(self.dev_release("patch"), "declares no kind input")
 
+    def test_an_unreadable_merge_setting_stops_it(self):
+        # GitHub returns allow_merge_commit only to a caller with admin rights;
+        # read as "not switched", the command would push to develop
+        self.make(allow_merge_commit=True)
+        self.sb.update_gh_state(admin=False)
+        for args in (("patch",), ("--open",)):
+            self.assertRefused(self.dev_release(*args), "admin rights")
+
     def test_no_dev_release_workflow_at_all(self):
         self.make(workflow=None, allow_merge_commit=True)
         self.assertRefused(self.dev_release("patch"), "declares no kind input")

@@ -1,7 +1,8 @@
 name: Test
 
 # The unit tests of the scripts: build-pages-site, generate-changelog,
-# assemble-workflows, back-merge-check, git-back-merge and git-dev-release;
+# assemble-workflows, back-merge-check, git-back-merge and git-dev-release, and
+# the offline parts of tests/acceptance/acceptance.py;
 # standard-library unittest on Python 3.13, with nothing installed. The
 # changelog script imports the anthropic SDK only inside its Highlights call,
 # which its tests stub, so they need no package and no network. The tests of
