@@ -73,9 +73,10 @@ jobs:
   # Create the GitHub Release for the tag, with GitHub's generated notes. A
   # documents repository keeps no CHANGELOG.md to generate and commit back to
   # main, and these notes are its release record: they list every pull request
-  # merged since the previous tag with its link. So the release has no changelog
-  # job. Idempotent: a re-run, or a Release already made by hand, finds it and
-  # exits 0.
+  # merged since the previous tag with its link, except the back-merge pull
+  # requests, labelled `release-bookkeeping`, which `.github/release.yml` leaves
+  # out. So the release has no changelog job. Idempotent: a re-run, or a Release
+  # already made by hand, finds it and exits 0.
   release:
     needs: gate
     runs-on: ubuntu-latest

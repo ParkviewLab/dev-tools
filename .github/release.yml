@@ -1,0 +1,8 @@
+# GitHub's generated release notes, which a documents repository's release
+# publishes as its record: a back-merge pull request, which `git back-merge`
+# labels `release-bookkeeping`, brings a release back into `develop` and is not
+# work shipped, so the notes leave it out (see the handbook's releases.md).
+changelog:
+  exclude:
+    labels:
+      - release-bookkeeping
