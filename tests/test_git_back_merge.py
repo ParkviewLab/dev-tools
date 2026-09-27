@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
 
 from backmerge_support import ReleasedRepo, Sandbox
 
@@ -63,9 +64,27 @@ class BackMergeCase(unittest.TestCase):
         self.sb.set_gh_state(self.repo.gh_state())
         return self.repo
 
-    def back_merge(self, *args, env=None):
-        return self.sb.script("git-back-merge", *args, cwd=self.repo.dev,
+    def back_merge(self, *args, env=None, cwd=None):
+        return self.sb.script("git-back-merge", *args, cwd=cwd or self.repo.dev,
                               env={"PARKVIEWLAB_HANDBOOK": str(self.handbook), **(env or {})})
+
+    def make_layout(self):
+        """The handbook's clone layout (docs/repo-layout.md, "Creating the layout"): a
+        bare clone with core.bare unset and HEAD on develop, as a clone of a repository
+        whose default branch is develop has it, beside the permanent worktrees
+        <repo>-main and <repo>-develop. Returns the develop and main worktrees."""
+        box = self.sb.tmp / "sim"
+        box.mkdir()
+        bare = box / "sim.git"
+        self.sb.git(box, "clone", "-q", "--bare", str(self.repo.origin), str(bare))
+        self.sb.git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        self.sb.git(bare, "fetch", "-q", "origin")
+        self.sb.git(bare, "config", "--unset", "core.bare")
+        self.sb.git(bare, "symbolic-ref", "HEAD", "refs/heads/develop")
+        for branch in ("main", "develop"):
+            self.sb.git(bare, "worktree", "add", "-q", f"../sim-{branch}", branch)
+            self.sb.git(bare, "branch", f"--set-upstream-to=origin/{branch}", branch)
+        return box / "sim-develop", box / "sim-main"
 
     def origin(self, *args, check=True):
         return self.sb.git(self.repo.origin, *args, check=check)
@@ -251,6 +270,34 @@ class HappyPaths(BackMergeCase):
         result = self.back_merge()
         self.assertOk(result)
         self.assertIn("has local changes; not pulled", result.stdout)
+
+    def test_the_develop_worktree_is_fast_forwarded(self):
+        r = self.make("pyproject")
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn(f"fast-forwarded {r.dev}\n", result.stdout)
+        self.assertEqual(self.sb.git(r.dev, "rev-parse", "HEAD"), self.origin("rev-parse", "develop"))
+
+    def test_in_the_handbook_layout_the_develop_worktree_is_fast_forwarded(self):
+        # From a linked worktree, git lists the bare clone (core.bare unset, HEAD
+        # develop) as a worktree on develop as well; it is not one, and is passed over.
+        self.make("pyproject")
+        develop_wt, _ = self.make_layout()
+        result = self.back_merge(cwd=develop_wt)
+        self.assertOk(result)
+        self.assertIn(f"fast-forwarded {develop_wt}\n", result.stdout)
+        self.assertNotIn("cannot change to", self.out(result))
+        self.assertEqual(self.sb.git(develop_wt, "rev-parse", "HEAD"), self.origin("rev-parse", "develop"))
+
+    def test_a_develop_worktree_whose_state_cannot_be_read_is_not_pulled(self):
+        self.make("pyproject")
+        develop_wt, main_wt = self.make_layout()
+        before = self.sb.git(develop_wt, "rev-parse", "HEAD")
+        (Path(self.sb.git(develop_wt, "rev-parse", "--git-dir")) / "index").write_bytes(b"not an index")
+        result = self.back_merge(cwd=main_wt)
+        self.assertOk(result)
+        self.assertIn(f"cannot read the state of {develop_wt}; not pulled", result.stdout)
+        self.assertEqual(self.sb.git(develop_wt, "rev-parse", "HEAD"), before)
 
     def test_a_required_check_whose_name_holds_a_comma(self):
         # a matrix job's check is named like "test (ubuntu-latest, 3.12)"
