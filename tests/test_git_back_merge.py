@@ -903,6 +903,102 @@ class PickedReleases(BackMergeCase):
         self.assertNoResidue()
 
 
+class SeveralMergeBases(BackMergeCase):
+    """Develop and main with more than one merge base: a release promoted from a develop
+    commit that did not yet hold an earlier back-merge, or a hotfix branch merged onto
+    main rather than picked. git back-merge refuses there only what back-merge-check
+    refuses, naming the exception: a release picked onto main, and a release whose step
+    7 comparison finds a version mismatch, where restoring develop's version would be
+    the wrong repair. A release made by promotion whose versions agree is built with git
+    merge --no-ff, as in v1.4.1, and the check passes it where its tree is the automatic
+    merge."""
+
+    EXCEPTION = ("the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its"
+                 " one push, the conflict resolved by hand")
+
+    def subject(self, rev):
+        return self.origin("log", "-1", "--format=%s", rev)
+
+    def test_a_promotion_whose_versions_agree_lands(self):
+        # develop holds v0.1.1's back-merge; then a feature D1 on develop, and a note
+        # pushed to main, Y, which develop merges; v0.1.2 is promoted from D1, which does
+        # not hold Y, so that Y and D1 are both merge bases; D1's version is develop's
+        r = self.make("pyproject")
+        r.land_back_merge()
+        g = r.g
+        g("fetch", "-q", "origin")
+        g("merge", "-q", "--ff-only", "origin/develop")
+        ReleasedRepo.edit(r.releaser, "d1.txt", "feature D1\n")
+        g("add", "d1.txt")
+        g("commit", "-q", "-m", "feat: feature D1 (#10)")
+        d1 = g("rev-parse", "HEAD")
+        g("push", "-q", "origin", "develop")
+        g("switch", "-q", "main")
+        g("merge", "-q", "--ff-only", "origin/main")
+        ReleasedRepo.edit(r.releaser, "notes.txt", "a note\n")
+        g("add", "notes.txt")
+        g("commit", "-q", "-m", "docs: a note pushed to main")
+        note = g("rev-parse", "HEAD")
+        g("push", "-q", "origin", "main")
+        g("switch", "-q", "develop")
+        g("merge", "-q", "--no-ff", note, "-m", "Merge main's note into develop (#11)")
+        g("push", "-q", "origin", "develop")
+        r.promote(d1, "0.1.2")
+        self.sb.set_gh_state(r.gh_state())
+        self.assertEqual(len(self.origin("merge-base", "--all", "develop", "main").split()), 2)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertNotIn("merge bases", self.out(result))
+        tip = self.origin("rev-parse", "develop")
+        c = self.origin("rev-parse", tip + "^2")
+        self.assertEqual(self.subject(c), "chore: open 0.1.3.dev0 dev cycle")
+        self.assertEqual(self.subject(c + "^"), "Back-merge: main → develop after v0.1.2")
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.3.dev0")
+        self.assertNoResidue()
+
+    def test_a_picked_release_is_refused_with_the_exception(self):
+        # a hotfix branch cut from develop's F, before v0.1.1's back-merge landed, merged
+        # onto main rather than picked: v0.1.1's main commit and F are both merge bases,
+        # and the merge's second parent is not develop's, so no promotion is found
+        r = self.make("pyproject")
+        g = r.g
+        g("fetch", "-q", "origin")
+        feature_f = g("rev-parse", "origin/develop")
+        r.land_back_merge()
+        g("switch", "-q", "-c", "hotfix-x", feature_f)
+        ReleasedRepo.edit(r.releaser, "fix.txt", "fix\n")
+        g("add", "fix.txt")
+        g("commit", "-q", "-m", "fix: x")
+        r.promote(g("rev-parse", "hotfix-x"), "0.1.2")
+        self.sb.set_gh_state(r.gh_state())
+        self.assertEqual(len(self.origin("merge-base", "--all", "develop", "main").split()), 2)
+        result = self.back_merge()
+        self.assertRefused(result, self.EXCEPTION)
+        self.assertIn("v0.1.2 is a release picked onto main", result.stdout)
+        self.assertIn("2 merge bases", result.stderr)
+        self.assertNotIn("decision 6", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+    def test_a_promotion_whose_version_changed_is_refused_with_the_exception(self):
+        # v0.1.2 promoted from develop's F, before v0.1.1's back-merge moved develop to
+        # 0.1.2.dev0: step 7 compares F's 0.1.1.dev0 with it, and restoring develop's
+        # version, decision 6 (a)'s repair, would be wrong
+        r = self.make("pyproject")
+        r.g("fetch", "-q", "origin")
+        feature_f = r.g("rev-parse", "origin/develop")
+        r.land_back_merge()
+        r.promote(feature_f, "0.1.2")
+        self.sb.set_gh_state(r.gh_state())
+        result = self.back_merge()
+        self.assertRefused(result, self.EXCEPTION)
+        self.assertIn("origin/develop's version is 0.1.2.dev0, but develop was promoted at 0.1.1.dev0", result.stderr)
+        self.assertIn("2 merge bases", result.stderr)
+        self.assertNotIn("decision 6", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+
 class ProjectVersion(BackMergeCase):
     """git back-merge reads a commit's version with _sot.sh's sot_read_at, which reads the
     project's own, as the version guard does: [project].version in pyproject.toml, the

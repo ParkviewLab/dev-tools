@@ -774,10 +774,12 @@ class ReleasedRepo:
         g("branch", "-q", "-D", "landing")
 
     def promote(self, commit: str, version: str) -> None:
-        """A release by promotion of a develop commit: its merge into main, the bump
-        to version and its tag. Promoting a commit that predates the landed
-        back-merge (land_back_merge()) crosses the two trunks' histories, so that a
-        later back-merge has two merge bases."""
+        """A release made by merging a commit into main: the merge, the bump to version,
+        its tag and, where the release writes a changelog, the bot's changelog commit;
+        the release then is the one gh_state describes. Promoting a develop commit that
+        predates the landed back-merge (land_back_merge()), or merging a hotfix branch
+        cut from one, crosses the two trunks' histories, so that the next back-merge
+        has two merge bases."""
         g = self.g
         g("switch", "-q", "main")
         g("merge", "-q", "--ff-only", "origin/main")
@@ -786,6 +788,13 @@ class ReleasedRepo:
         g("commit", "-q", "-am", f"release v{version}")
         g("tag", "-a", f"v{version}", "-m", f"Release v{version}")
         g("push", "-q", "origin", "main", "--follow-tags")
+        tag_commit = g("rev-parse", f"v{version}^{{commit}}")
+        if self.changelog:
+            self.edit(self.releaser, "CHANGELOG.md", f"# Changelog\n\n## [v{version}]\n- promoted\n")
+            g("commit", "-q", "-am", f"docs(changelog): v{version} [skip ci]", env=BOT)
+            g("push", "-q", "origin", "main")
+        self.main_tip = g("rev-parse", "main")
+        self.release_tag, self.release_commit = f"v{version}", tag_commit
         g("switch", "-q", "develop")
 
     def hotfix(self, version: str | None = None, fix: tuple[str, str] = ("fix.txt", "fix\n"),
