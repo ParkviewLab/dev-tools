@@ -856,9 +856,32 @@ class PickedReleases(BackMergeCase):
         self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
         self.assertNoResidue()
 
+    def repair_6a(self, version):
+        """Decision 6 (a)'s repair, carried out: one commit restoring develop's version
+        lines (the version file and its lockfile) to version, pushed to develop directly."""
+        r = self.repo
+        r.g("fetch", "-q", "origin")
+        r.g("switch", "-q", "develop")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, version)
+        r.g("commit", "-q", "-am", f"chore: restore develop's version to {version} (decision 6 (a))")
+        r.g("push", "-q", "origin", "develop")
+
+    def assertRepair6a(self, result, version):
+        """Refused with decision 6 (a)'s repair, naming the version to restore, not the exception."""
+        self.assertRefused(result, "Repair it (decision 6 (a) of the real-merges design): one reviewed commit"
+                                   f" restoring develop's version lines (the version file and its lockfile) to {version},"
+                                   " pushed to develop directly (with enforce_admins switched off and on again where"
+                                   " administrators are bound); then run git back-merge again.")
+        self.assertNotIn("the direct back-merge", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
     def test_a_first_release_reached_by_a_fast_forward_whose_version_changed(self):
         # develop re-pointed during a first release that main reached by a fast-forward:
-        # the change is not the release flow's own, so no merge is taken from main
+        # the change is not the release flow's own. The merge base, where main was
+        # fast-forwarded, is not at a release, so the version to restore is its own,
+        # which makes the automatic merge clean
         r = self.make("pyproject", first_release_by_fast_forward=True)
         r.g("fetch", "-q", "origin")
         r.g("merge", "-q", "--ff-only", "origin/develop")
@@ -866,13 +889,18 @@ class PickedReleases(BackMergeCase):
         r.g("commit", "-q", "-am", "chore: develop re-pointed to 0.2.0.dev0")
         r.g("push", "-q", "origin", "develop")
         result = self.back_merge()
-        self.assertRefused(result, "the merge base's version must be a release X.Y.Z, and it is 0.1.1.dev0")
-        self.assertIn("the direct back-merge, with administrators unbound", result.stderr)
+        self.assertIn("the merge base's version must be a release X.Y.Z, and it is 0.1.1.dev0", result.stderr)
+        self.assertRepair6a(result, "0.1.1.dev0")
         self.assertEqual(r.version_at("develop", cwd=r.origin), "0.2.0.dev0")
-        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
-        self.assertNoResidue()
+        self.repair_6a("0.1.1.dev0")
+        again = self.back_merge()
+        self.assertOk(again)
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
+        self.assertTrue(self.is_ancestor(r.tag_commit, "develop"))
 
     def test_develop_away_from_the_placeholder_its_back_merge_opened(self):
+        # v0.1.1's back-merge opened 0.1.2.dev0, a dev build then committed 0.1.2.dev1,
+        # and v0.1.2 was picked onto main: the version to restore is the placeholder
         r = self.make("pyproject")
         r.land_back_merge()
         r.g("fetch", "-q", "origin")
@@ -883,10 +911,15 @@ class PickedReleases(BackMergeCase):
         r.hotfix()
         self.sb.set_gh_state(r.gh_state())
         result = self.back_merge()
-        self.assertRefused(result, "develop's version must be 0.1.2.dev0, the next-patch placeholder of the merge"
-                                   " base's 0.1.1, and it is 0.1.2.dev1")
-        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
-        self.assertNoResidue()
+        self.assertIn("develop's version must be 0.1.2.dev0, the next-patch placeholder of the merge base's 0.1.1,"
+                      " and it is 0.1.2.dev1", result.stderr)
+        self.assertRepair6a(result, "0.1.2.dev0")
+        self.repair_6a("0.1.2.dev0")
+        again = self.back_merge()
+        self.assertOk(again)
+        self.assertIn("(a release picked onto main: the version lines taken from main)", again.stdout)
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.3.dev0")
+        self.assertTrue(self.is_ancestor(r.tag3_commit, "develop"))
 
     def test_a_first_release_reached_by_a_fast_forward(self):
         # no promotion commit, so it counts as picked; the automatic merge is clean,

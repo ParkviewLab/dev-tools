@@ -30,13 +30,16 @@
 # plain merge conflicts on them by construction; the open-cycle commit follows as
 # for any release. That merge is taken only for the version change the release
 # flow makes: the merge base at a release R, and develop at R's next-patch
-# placeholder, which R's back-merge opened. Where the check gives no such merge,
-# because the merge conflicts or develop's version changed otherwise, the command
-# refuses and prescribes the exception ruled on 2026-09-27, the direct back-merge
-# with administrators unbound for its one push, the conflict resolved by hand:
-# decision 6 (d)'s repair would bring develop's side into agreement with main's,
-# the hotfix's older side. An error of the check (exit 2: a git before 2.40, a
-# shallow clone) is reported as such, with no repair.
+# placeholder, which R's back-merge opened. Where develop's version is otherwise,
+# the command prescribes decision 6 (a)'s repair, naming the version to restore:
+# R's next-patch placeholder, or where the merge base is not at a release (a first
+# release reached by a fast-forward) the merge base's own version, which makes the
+# automatic merge clean. Where the merge conflicts, it prescribes the exception
+# ruled on 2026-09-27, the direct back-merge with administrators unbound for its
+# one push, the conflict resolved by hand: decision 6 (d)'s repair would bring
+# develop's side into agreement with main's, the hotfix's older side. An error of
+# the check (exit 2: a git before 2.40, a shallow clone) is reported as such, with
+# no repair.
 # Step 7, which refuses a version change that reached develop during a
 # promotion, seeks the promotion on the tag's first-parent line as far as
 # origin/develop holds it, which is what the back-merge brings of main's own
@@ -382,6 +385,9 @@ release_promotion() {  # $1 = the tag's commit, $2 = develop's tip; prints the n
   return 0
 }
 PROMO=""
+repair_6a() {  # $1 = what was found, $2 = the version to restore; refuses with decision 6 (a)'s repair
+  die "$1. Repair it (decision 6 (a) of the real-merges design): one reviewed commit restoring develop's version lines (the version file and its lockfile) to $2, pushed to develop directly (with enforce_admins switched off and on again where administrators are bound); then run git back-merge again."
+}
 refuse_version_conflict() {  # 7.
   local p2 v_promo v_dev bases rc n
   # The promotion is sought on the tag's first-parent line as far as origin/develop
@@ -405,11 +411,11 @@ refuse_version_conflict() {  # 7.
   (( rc <= 1 )) || die "git merge-base failed ($rc)"
   n="$(printf '%s\n' "$bases" | grep -c . || true)"
   [[ "$n" == 1 ]] || die "origin/develop's version is $v_dev, but develop was promoted at $v_promo, and origin/develop and origin/main have $n merge bases, where restoring develop's version lines would be the wrong repair. Its back-merge is the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its one push, the conflict resolved by hand. Nothing is pushed."
-  die "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop during the release, and the back-merge would conflict on the version line. Repair it (decision 6 (a) of the real-merges design): one reviewed commit restoring develop's version lines (the version file and its lockfile) to $v_promo, pushed to develop directly (with enforce_admins switched off and on again where administrators are bound); then run git back-merge again."
+  repair_6a "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop during the release, and the back-merge would conflict on the version line" "$v_promo"
 }
 picked_merge() {  # 8, for a release picked onto main: prints the merge commit M, whose tree
                   # back-merge-check --merge-tree gives, so that the two apply one rule
-  local base main out rc reason tree
+  local base main out rc reason restore tree
   base="$(git rev-parse origin/develop)"; main="$(git rev-parse origin/main)"
   rc=0; out="$("$CHECK" --merge-tree "$base" origin/main "$TAG" 2>&1)" || rc=$?
   if [[ "$rc" != 0 ]]; then
@@ -421,6 +427,17 @@ picked_merge() {  # 8, for a release picked onto main: prints the merge commit M
       "develop and main have "*" merge bases, "*)
         # several merge bases, where the check gives no merge of a release picked onto main
         die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason. Its back-merge is the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its one push, the conflict resolved by hand. Nothing is pushed." ;;
+      *"develop's version must be "*", the next-patch placeholder of the merge base's "*)
+        # develop's version is not the placeholder the release flow sets: restore it,
+        # after which the merge takes main's version as the flow would
+        restore="${reason#*"develop's version must be "}"; restore="${restore%%", the next-patch placeholder"*}"
+        repair_6a "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason" "$restore" ;;
+      *"the merge base's version must be a release X.Y.Z, and it is "*)
+        # the merge base is not at a release (a first release reached by a
+        # fast-forward): restoring develop's version to the merge base's makes the
+        # automatic merge clean
+        restore="${reason##*"and it is "}"
+        repair_6a "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason" "$restore" ;;
       *" conflicts in: "*)
         # Decision 6 (d)'s repair brings develop's side of each conflicting passage
         # into agreement with main's, which for a hotfix is the older side: it would
