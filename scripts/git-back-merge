@@ -23,8 +23,10 @@
 # older tag, waits for develop's required checks, and merges it with --merge
 # --match-head-commit, never --admin. Each step first tests whether it
 # has already been done, so a second run after an interruption resumes. A branch
-# that develop has moved beyond is rebuilt from the new develop, never updated with
-# GitHub's "Update branch". A repository that does not yet allow merge commits
+# that develop has moved beyond is rebuilt from the new develop when a run finds it
+# and, in a repository that requires up-to-date branches, when develop moves while
+# the checks run; it is never updated with GitHub's "Update branch". A repository
+# that does not yet allow merge commits
 # still ends its release with the direct back-merge; there the command refuses and
 # quotes the released handbook. See the handbook's releases.md and branching.md.
 #
