@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# install.sh — symlink every script in scripts/ into ~/.local/bin/
+# install.sh — symlink every executable script in scripts/ into ~/.local/bin/
 #
 # Idempotent. Re-run safely: existing symlinks pointing at our scripts are left alone;
 # existing files / wrong-target symlinks are replaced (-f).
