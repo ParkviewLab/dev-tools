@@ -62,6 +62,19 @@ RELEASES_MD_LAST_STEP = RELEASES_MD_PR_SECTION.replace(
     "## After the release: the back-merge pull request", "## The release's last step: the back-merge pull request")
 
 
+def exception(version: str) -> str:
+    """The exception ruled on 2026-09-27 with its procedure, one text wherever a refusal of
+    git back-merge names it: the owner ruled on 2026-09-26 that a refusal states its full
+    repair. version is main's release version, to which the version lines are resolved."""
+    return ("Nothing is pushed. Its back-merge is the exception ruled on 2026-09-27, the direct back-merge:"
+            " in the develop worktree, bring main and develop up to date and run git merge --no-ff main;"
+            f" resolve the version lines to main's release version, {version}, and every other conflict by"
+            " hand; commit the merge; then, in a code repository, run git dev-release --open --direct, which"
+            " writes the next placeholder and pushes both commits in one push, or, in a VERSION.txt repository,"
+            " push develop. Where administrators are bound, switch enforce_admins off before that push and on"
+            " again after it.")
+
+
 class BackMergeCase(unittest.TestCase):
 
     def setUp(self):
@@ -758,11 +771,11 @@ class PickedReleases(BackMergeCase):
         self.assertPicked(r, self.back_merge(), None)
 
     def assertTheException(self, result):
-        """Refused, prescribing the exception ruled on 2026-09-27 for a hotfix's conflict:
-        decision 6 (d)'s repair would bring develop's newer work on those lines back to
-        the hotfix's, and whether the conflict lies on a version line is not known."""
-        self.assertRefused(result, "the direct back-merge, with administrators unbound for its one push")
-        self.assertIn("the conflict resolved by hand", result.stderr)
+        """Refused, prescribing the exception ruled on 2026-09-27, with its procedure, for a
+        hotfix's conflict: decision 6 (d)'s repair would bring develop's newer work on those
+        lines back to the hotfix's, and whether the conflict lies on a version line is not
+        known."""
+        self.assertRefused(result, exception(self.repo.v3))
         self.assertNotIn("Repair it (decision 6 (d)", result.stderr)
         self.assertNotIn("decision 6 (a)", result.stderr)
         self.assertNotIn("lies elsewhere", result.stderr)
@@ -780,6 +793,21 @@ class PickedReleases(BackMergeCase):
         self.make_picked("pyproject", fix=FIX_LINE_2, after_fix=rework_line_2)
         result = self.back_merge()
         self.assertIn("conflicts in: app.txt", result.stderr)
+        self.assertTheException(result)
+
+    def test_a_reason_no_named_refusal_covers_is_refused_with_the_exception(self):
+        # develop's version file cannot be parsed: the check gives no merge, for a reason
+        # that none of the refusals the command names covers, and the command prescribes
+        # the exception, with the same text
+        def break_pyproject(repo):
+            text = (repo.releaser / "pyproject.toml").read_text()
+            (repo.releaser / "pyproject.toml").write_text(
+                text.replace('requires-python = ">=3.11"', 'requires-python = ">=3.11'))
+            repo.g("commit", "-q", "-am", "build: an unterminated string (#9)")
+        self.make_picked("pyproject", after_fix=break_pyproject)
+        result = self.back_merge()
+        self.assertIn("back-merge-check accepts no merge of origin/main into origin/develop for v0.1.2: for a release"
+                      " picked onto main, develop's version cannot be read", result.stderr)
         self.assertTheException(result)
 
     def test_a_shallow_clone_is_refused_before_anything_is_compared(self):
@@ -987,8 +1015,7 @@ class SeveralMergeBases(BackMergeCase):
     merge --no-ff, as in v1.4.1, and the check passes it where its tree is the automatic
     merge."""
 
-    EXCEPTION = ("the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its"
-                 " one push, the conflict resolved by hand")
+    EXCEPTION = exception("0.1.2")
 
     def subject(self, rev):
         return self.origin("log", "-1", "--format=%s", rev)

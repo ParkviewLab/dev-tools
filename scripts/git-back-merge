@@ -35,12 +35,13 @@
 # R's next-patch placeholder, or where the merge base is not at a release (a first
 # release reached by a fast-forward) the merge base's own version, which makes the
 # automatic merge clean. Where the merge conflicts, it prescribes the exception
-# ruled on 2026-09-27, the direct back-merge with administrators unbound for its
-# one push, the conflict resolved by hand: decision 6 (d)'s repair would bring
-# develop's side into agreement with main's, the hotfix's older side. An error of
-# the check (exit 2, such as a git before 2.40 where a picked release needs
-# `git merge-tree --merge-base`) is reported as such, with no repair. A shallow
-# repository is refused at step 1, before anything is compared.
+# ruled on 2026-09-27, the direct back-merge, stating its procedure
+# (refuse_exception, below), as every refusal that names the exception does:
+# decision 6 (d)'s repair would bring develop's side into agreement with main's,
+# the hotfix's older side. An error of the check (exit 2, such as a git before
+# 2.40 where a picked release needs `git merge-tree --merge-base`) is reported as
+# such, with no repair. A shallow repository is refused at step 1, before anything
+# is compared.
 # Step 7, which refuses a version change that reached develop outside the release
 # flow after a promotion, seeks the promotion on the tag's first-parent line as
 # far as origin/develop holds it, which is what the back-merge brings of main's
@@ -394,6 +395,12 @@ PROMO=""
 repair_6a() {  # $1 = what was found, $2 = the version to restore; refuses with decision 6 (a)'s repair
   die "$1. Repair it (decision 6 (a) of the real-merges design): one reviewed commit restoring develop's version lines (the version file and its lockfile) to $2, pushed to develop directly (with enforce_admins switched off and on again where administrators are bound); then run git back-merge again."
 }
+# The exception ruled on 2026-09-27, the direct back-merge, with its procedure: one
+# text wherever a refusal names it, since a refusal states its full repair (ruled on
+# 2026-09-26).
+refuse_exception() {  # $1 = what was found; refuses with the exception and its procedure
+  die "$1. Nothing is pushed. Its back-merge is the exception ruled on 2026-09-27, the direct back-merge: in the develop worktree, bring main and develop up to date and run git merge --no-ff main; resolve the version lines to main's release version, $V_MAIN, and every other conflict by hand; commit the merge; then, in a code repository, run git dev-release --open --direct, which writes the next placeholder and pushes both commits in one push, or, in a VERSION.txt repository, push develop. Where administrators are bound, switch enforce_admins off before that push and on again after it."
+}
 refuse_version_conflict() {  # 7.
   local p2 v_promo v_dev bases rc n
   # The promotion is sought on the tag's first-parent line as far as origin/develop
@@ -416,7 +423,7 @@ refuse_version_conflict() {  # 7.
   rc=0; bases="$(git merge-base --all origin/develop origin/main)" || rc=$?
   (( rc <= 1 )) || die "git merge-base failed ($rc)"
   n="$(printf '%s\n' "$bases" | grep -c . || true)"
-  [[ "$n" == 1 ]] || die "origin/develop's version is $v_dev, but develop was promoted at $v_promo, and origin/develop and origin/main have $n merge bases, where restoring develop's version lines would be the wrong repair. Its back-merge is the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its one push, the conflict resolved by hand. Nothing is pushed."
+  [[ "$n" == 1 ]] || refuse_exception "origin/develop's version is $v_dev, but develop was promoted at $v_promo, and origin/develop and origin/main have $n merge bases, where restoring develop's version lines would be the wrong repair"
   repair_6a "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop outside the release flow, whether or not the merge would conflict" "$v_promo"
 }
 picked_merge() {  # 8, for a release picked onto main: prints the merge commit M, whose tree
@@ -433,7 +440,7 @@ picked_merge() {  # 8, for a release picked onto main: prints the merge commit M
     case "$reason" in
       "develop and main have "*" merge bases, "*)
         # several merge bases, where the check gives no merge of a release picked onto main
-        die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason. Its back-merge is the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its one push, the conflict resolved by hand. Nothing is pushed." ;;
+        refuse_exception "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason" ;;
       *"develop's version must be "*", the next-patch placeholder of the merge base's "*)
         # develop's version is not the placeholder the release flow sets: restore it,
         # after which the merge takes main's version as the flow would
@@ -449,9 +456,10 @@ picked_merge() {  # 8, for a release picked onto main: prints the merge commit M
         # Decision 6 (d)'s repair brings develop's side of each conflicting passage
         # into agreement with main's, which for a hotfix is the older side: it would
         # undo develop's newer work on those lines. The owner ruled the exception.
-        die "the merge of origin/main into origin/develop conflicts in: ${reason##*" conflicts in: "}. $TAG is a release picked onto main, a hotfix, whose conflict decision 6 (d)'s repair would settle by undoing develop's newer work on those lines. Its back-merge is the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its one push, the conflict resolved by hand. Nothing is pushed." ;;
+        refuse_exception "the merge of origin/main into origin/develop conflicts in: ${reason##*" conflicts in: "}. $TAG is a release picked onto main, a hotfix, whose conflict decision 6 (d)'s repair would settle by undoing develop's newer work on those lines" ;;
       *)
-        die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason. Nothing is pushed. It needs a person: the exception for a back-merge that git back-merge refuses is the direct back-merge, with administrators unbound for its one push (ruled on 2026-09-27)." ;;
+        # a reason none of the above covers (an unreadable version file or name)
+        refuse_exception "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason" ;;
     esac
   fi
   tree="${out##*$'\n'}"
