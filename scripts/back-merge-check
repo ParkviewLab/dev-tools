@@ -39,10 +39,8 @@
 #             prescribes: for a version other than the release flow's, the
 #             version the reason names as develop's due, R's next-patch
 #             placeholder, or the merge base's own where that is not a release,
-#             which the version-line repair restores; for a conflict or several
-#             merge bases, the exception, the direct back-merge (the handbook's
-#             releases.md, "The release's last step: the back-merge pull
-#             request").
+#             which decision 6 (a)'s repair restores; for a conflict or several
+#             merge bases, the exception ruled on 2026-09-27.
 #
 # `git back-merge` runs this on its own branch before it pushes, and, in a
 # repository that has switched to merge commits, the version guard runs it in its
