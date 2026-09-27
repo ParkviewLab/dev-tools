@@ -51,35 +51,40 @@ sot_kind_at() {  # $1 = commit; echoes pyproject | package | version-txt | none
   else echo none; fi
 }
 
-sot_version_reader() {  # $1 = pyproject | package, $2 = the file, named in a message; reads
-                        # the file on standard input and prints the project's own version, or
-                        # fails with a message: status 1 where the file holds no such version or
-                        # cannot be parsed, 3 where nothing here can parse it. pyproject.toml is
-                        # parsed by python3 where it has tomllib (3.11 or later), else by the
-                        # Python 3.11 or later that uv provides, which a pyproject.toml repository
-                        # requires; package.json by python3, else by node, which a package.json
-                        # repository requires.
+sot_project_reader() {  # $1 = pyproject | package | pyproject-name, $2 = the file, named in a
+                        # message; reads the file on standard input and prints the project's own
+                        # version, or with pyproject-name the [project] table's name normalised as
+                        # PEP 503 gives it (lowercase, each run of - _ . as one -), or fails with a
+                        # message: status 1 where the file holds no such value or cannot be
+                        # parsed, 3 where nothing here can parse it. pyproject.toml is parsed by
+                        # python3 where it has tomllib (3.11 or later), else by the Python 3.11 or
+                        # later that uv provides, which a pyproject.toml repository requires;
+                        # package.json by python3, else by node, which a package.json repository
+                        # requires.
   local py='
-import json, sys
+import json, re, sys
 kind, what = sys.argv[1], sys.argv[2]
 data = sys.stdin.buffer.read()
 try:
-    if kind == "pyproject":
+    if kind == "package":
+        doc = json.loads(data)
+        value = doc.get("version") if isinstance(doc, dict) else None
+        missing = "version at its top level"
+    else:
         import tomllib
         table = tomllib.loads(data.decode("utf-8")).get("project")
-        version = table.get("version") if isinstance(table, dict) else None
-        missing = "static version in its [project] table"
-    else:
-        doc = json.loads(data)
-        version = doc.get("version") if isinstance(doc, dict) else None
-        missing = "version at its top level"
+        key = "name" if kind == "pyproject-name" else "version"
+        value = table.get(key) if isinstance(table, dict) else None
+        missing = "name in its [project] table" if key == "name" else "static version in its [project] table"
 except ValueError as error:
     sys.exit("%s cannot be parsed: %s" % (what, error))
-if not isinstance(version, str) or not version:
+if not isinstance(value, str) or not value:
     sys.exit("%s holds no %s" % (what, missing))
-print(version)'
+if kind == "pyproject-name":
+    value = re.sub(r"[-_.]+", "-", value).lower()
+print(value)'
   local rc
-  if [ "$1" = pyproject ]; then
+  if [ "$1" != package ]; then
     if python3 -c 'import tomllib' >/dev/null 2>&1; then python3 -c "$py" "$@"
     elif command -v uv >/dev/null 2>&1; then
       rc=0; uv run --no-project --quiet --python '>=3.11' python -c "$py" "$@" || rc=$?
@@ -100,8 +105,8 @@ print(version)'
 sot_read_at() {  # $1 = commit, $2 = kind (from sot_kind_at); echoes the project's own version
                  # there, or fails with a message
   case "$2" in
-    pyproject)   git show "$1:pyproject.toml" | sot_version_reader pyproject "pyproject.toml at $1" ;;
-    package)     git show "$1:package.json" | sot_version_reader package "package.json at $1" ;;
+    pyproject)   git show "$1:pyproject.toml" | sot_project_reader pyproject "pyproject.toml at $1" ;;
+    package)     git show "$1:package.json" | sot_project_reader package "package.json at $1" ;;
     version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
   esac
 }

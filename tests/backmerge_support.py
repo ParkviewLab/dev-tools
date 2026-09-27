@@ -112,10 +112,21 @@ def set_project_version_text(text: str, version: str) -> str:
     return "".join(lines)
 
 
+def project_name_text(text: str) -> str:
+    """The [project] table's name in pyproject.toml's text, as uv reads it."""
+    inside = False
+    for line in text.splitlines():
+        if line.startswith("["):
+            inside = line.strip() == "[project]"
+        elif inside and line.startswith('name = "'):
+            return re.match(r'name = "([^"]*)"', line).group(1)
+    raise ValueError("no name in the [project] table")
+
+
 def set_pyproject_version(wt: Path, version: str, lock: bool = True) -> None:
     p = wt / "pyproject.toml"
     text = p.read_text()
-    name = re.search(r'(?m)^name = "([^"]*)"', text).group(1)
+    name = project_name_text(text)
     p.write_text(set_project_version_text(text, version))
     if lock and (wt / "uv.lock").exists():
         set_uv_lock_version(wt, normalised(name), version)
@@ -207,7 +218,11 @@ if a[:1] == ["version"] and len(a) >= 2:
         open(os.environ["FAKE_UV_LOG"], "a").write("UV_NO_SYNC=%s\n" % os.environ.get("UV_NO_SYNC", ""))
     v = [x for x in a[1:] if not x.startswith("-")][0]
     text = open("pyproject.toml").read()
-    name = re.sub(r"[-_.]+", "-", re.search(r'(?m)^name = "([^"]*)"', text).group(1)).lower()
+    inside, name = False, None   # the [project] table's name, as uv reads it
+    for l in text.splitlines():
+        if l.startswith("["): inside = l.strip() == "[project]"
+        elif inside and name is None and l.startswith('name = "'): name = re.match(r'name = "([^"]*)"', l).group(1)
+    name = re.sub(r"[-_.]+", "-", name).lower()
     lines, inside = text.splitlines(True), False
     for i, l in enumerate(lines):
         if l.startswith("["): inside = l.strip() == "[project]"

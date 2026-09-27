@@ -23,7 +23,7 @@ import shutil
 import unittest
 
 from backmerge_support import (FIX_LINE_2, SCRIPTS, ReleasedRepo, Sandbox, rework_line_2, set_package_version,
-                               set_pyproject_version, upgrade_twin)
+                               set_pyproject_version, set_uv_lock_version, upgrade_twin)
 
 PASS, FAIL, ERROR = 0, 1, 2
 VERSION_FILES = {"pyproject": ("pyproject.toml", "uv.lock"), "package": ("package.json", "package-lock.json"),
@@ -783,6 +783,13 @@ class PickedRelease(CheckCase):
         r.g("commit", "-q", "-am", "chore: open 0.23.3-dev dev cycle")
         self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.23.2"), "skips the open cycle")
 
+    def test_another_tables_name_line_before_the_project_table(self):
+        # the lockfile's block to set is the [project] table's name's, not the first name line's
+        r, base = self.build("pyproject", pyproject_head='[tool.x]\nname = "tooling"\n\n')
+        m = self.merge()
+        self.assertOutcome(PASS, self.check(base, m, tag="v0.1.2"), self.PICKED_OK.format("0.1.2"))
+        self.assertTree(self.merge_tree(base, "v0.1.2"), self.tree(m))
+
     # refused
     def test_a_hand_edit_in_the_merge_is_refused(self):
         r, base = self.build("pyproject")
@@ -1011,6 +1018,19 @@ class ProjectVersion(CheckCase):
         self.assertOutcome(FAIL, result, "cannot read the project's own version of head")
         self.assertIn("cannot be parsed", result.stdout)
 
+    def test_another_tables_name_line_before_the_project_table(self):
+        # [tool.x]'s name is twin's, a locked dependency at the release's version. The
+        # project is the [project] table's: an open cycle that moves twin's locked
+        # version and leaves the project's behind is refused, and the right one passes
+        r, base, m = self.build(pyproject_head='[tool.x]\nname = "twin"\n\n', lock_twin=True)
+        self.assertOutcome(PASS, self.check(base, self.open_cycle("0.1.2.dev0"), tag="v0.1.1"),
+                           "0.1.1 -> 0.1.2.dev0 (pyproject.toml uv.lock)")
+        r.g("switch", "-q", "-c", "twin-moved", m)
+        set_pyproject_version(r.releaser, "0.1.2.dev0", lock=False)
+        set_uv_lock_version(r.releaser, "twin", "0.1.2.dev0")
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "is not in the sim-app package block")
+
     def test_no_parser_for_pyproject_toml_is_an_error(self):
         # python3 without tomllib, and a uv that can provide no Python 3.11 or later
         r, base, m = self.build()
@@ -1069,9 +1089,9 @@ class CopiesAgree(unittest.TestCase):
         ours, theirs = self.reading_lines("back-merge-check"), self.reading_lines("_sot.sh")
         self.assertEqual(len(ours), 6)
         self.assertEqual(ours, theirs)
-        reader = self.function("back-merge-check", "sot_version_reader")
+        reader = self.function("back-merge-check", "sot_project_reader")
         self.assertIn("import tomllib", reader)
-        self.assertEqual(reader, self.function("_sot.sh", "sot_version_reader"))
+        self.assertEqual(reader, self.function("_sot.sh", "sot_project_reader"))
 
     def test_the_rule_for_a_release_picked_onto_main(self):
         ours = self.function("back-merge-check", "release_promotion")

@@ -744,6 +744,11 @@ class PickedReleases(BackMergeCase):
         self.assertEqual(self.sb.gh_state()["prs"], [])
         self.assertNoResidue()
 
+    def test_another_tables_name_line_before_the_project_table(self):
+        r = self.make_picked("pyproject", pyproject_head='[tool.x]\nname = "tooling"\n\n')
+        self.assertPicked(r, self.back_merge(), "0.1.3.dev0")
+        self.assertIn('name = "sim-app"\nversion = "0.1.3.dev0"\n', self.origin("show", "develop:uv.lock"))
+
     def test_a_conflict_is_refused_with_the_exception(self):
         # the pick changed a line that develop has changed again since
         self.make_picked("pyproject", fix=FIX_LINE_2, after_fix=rework_line_2)
