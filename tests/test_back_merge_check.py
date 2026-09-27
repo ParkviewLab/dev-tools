@@ -10,7 +10,9 @@ condition 4 requires. Further cases cover what the simulation did not construct:
 a lockfile line that belongs to a dependency, a repository without a lockfile,
 real-sized lockfiles, names uv normalises, tag names, exit codes, condition 2 on
 its own, and attempts to pass other changes through the open-cycle commit or a
-tag that shadows main.
+tag that shadows main. The back-merge of a release picked onto main (a hotfix),
+whose merge condition 3 takes with the project's version lines set to main's,
+has its own cases, as has the --merge-tree mode that git back-merge builds it by.
 """
 
 from __future__ import annotations
@@ -19,9 +21,19 @@ import json
 import re
 import unittest
 
-from backmerge_support import ReleasedRepo, Sandbox, set_package_version, set_pyproject_version
+from backmerge_support import (SCRIPTS, ReleasedRepo, Sandbox, set_package_version, set_pyproject_version,
+                               upgrade_twin)
 
 PASS, FAIL, ERROR = 0, 1, 2
+VERSION_FILES = {"pyproject": ("pyproject.toml", "uv.lock"), "package": ("package.json", "package-lock.json"),
+                 "version-txt": ("VERSION.txt",)}
+FIX_LINE_2 = ("app.txt", "line 1\nline 2 (fixed)\nline 3\n")
+
+
+def rework_line_2(repo):
+    """A change merged into develop after the fix, to the line the fix changed."""
+    ReleasedRepo.edit(repo.releaser, "app.txt", "line 1\nline 2 (fixed, then reworked)\nline 3\n")
+    repo.g("commit", "-q", "-am", "feat: rework line 2 (#9)")
 
 
 class CheckCase(unittest.TestCase):
@@ -31,6 +43,14 @@ class CheckCase(unittest.TestCase):
     def check(self, base, head, main="origin/main", tag=None, cwd=None, env=None):
         args = [base, head, main] + ([tag] if tag else [])
         return self.sb.script("back-merge-check", *args, cwd=cwd or self.repo.releaser, env=env)
+
+    def merge_tree(self, develop, tag, main="origin/main", env=None):
+        return self.sb.script("back-merge-check", "--merge-tree", develop, main, tag, cwd=self.repo.releaser, env=env)
+
+    def assertTree(self, result, tree):
+        """The --merge-tree mode printed tree on its last line."""
+        self.assertEqual(result.returncode, PASS, f"\n{result.stdout}\n{result.stderr}")
+        self.assertEqual(result.stdout.splitlines()[-1], tree)
 
     def assertOutcome(self, expected, result, fragment=None):
         msg = f"\n{result.stdout}\n{result.stderr}"
@@ -627,13 +647,285 @@ class SecondReview(CheckCase):
         self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "is not its changelog commit")
 
 
+class PickedRelease(CheckCase):
+    """The back-merge of a release picked onto main: a hotfix, made as the handbook
+    gives it, `git cherry-pick -m 1` of a pull request's merge on develop, then the
+    bump and the tag, with no promotion.
+
+    In a code repository the automatic merge of main into develop conflicts on the
+    project's version lines by construction: since their merge base, main has moved
+    them to the hotfix's version and develop to its placeholder. In tag mode,
+    condition 3 then takes the merge in which those lines of develop and of the
+    merge base are first set to main's version. M is made here independently of the
+    check: git's own merge, its conflicting version files resolved to develop's with
+    the project's version set by the fixtures' setters.
+    """
+
+    def build(self, kind="pyproject", fix=("fix.txt", "fix\n"), after_fix=None, **kw):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, kind, **kw)
+        r.land_back_merge()
+        r.hotfix(fix=fix, after_fix=after_fix)
+        r.g("fetch", "-q", "origin")
+        return r, r.g("rev-parse", "origin/develop")
+
+    def merge(self, take="main", edit=None, name="back-merge"):
+        """M: git's merge of main into develop. Where it conflicts, each conflicting
+        version file is taken from develop, with the project's version set to main's
+        where take is "main", edit(worktree) is applied, and the result committed,
+        whatever remains conflicted included."""
+        r, g = self.repo, self.repo.g
+        message = f"Back-merge: main → develop after {r.tag3}"
+        g("switch", "-q", "-C", name, "origin/develop")
+        merged = self.sb.run(["git", "merge", "-q", "--no-ff", "origin/main", "-m", message], r.releaser, check=False)
+        if merged.returncode != 0:
+            conflicted = g("diff", "--name-only", "--diff-filter=U").split()
+            ours = [f for f in VERSION_FILES[r.kind] if f in conflicted]
+            if ours:
+                g("checkout", "-q", "--ours", "--", *ours)
+            if take == "main":
+                r.set_version(r.releaser, r.v3)
+            if edit:
+                edit(r.releaser)
+            g("add", "-A")
+            g("commit", "-q", "-m", message)
+        return g("rev-parse", "HEAD")
+
+    def open_cycle(self):
+        r = self.repo
+        r.set_version(r.releaser, r.placeholder3)
+        r.g("commit", "-q", "-am", f"chore: open {r.placeholder3} dev cycle")
+        return r.g("rev-parse", "HEAD")
+
+    def tree(self, commit):
+        return self.repo.g("rev-parse", f"{commit}^{{tree}}")
+
+    PICKED_OK = ("tree of the merge equals the automatic merge with the project's version lines of develop and the"
+                 " merge base set to main's {} (a release picked onto main)")
+
+    # accepted
+    def test_pyproject_with_uv_lock(self):
+        # the lockfile's dependency twin stands at the project's version at the merge
+        # base (0.1.1), and develop has upgraded it since: a line rewritten for its
+        # value, or outside the project's block, would conflict or undo the upgrade
+        r, base = self.build("pyproject", lock_twin=True, after_fix=upgrade_twin)
+        m = self.merge()
+        self.assertIn('name = "twin"\nversion = "0.2.0"\n', r.g("show", f"{m}:uv.lock"))
+        self.assertOutcome(PASS, self.check(base, m, tag="v0.1.2"), self.PICKED_OK.format("0.1.2"))
+        c = self.open_cycle()
+        self.assertOutcome(PASS, self.check(base, c, tag="v0.1.2"), "0.1.2 -> 0.1.3.dev0 (pyproject.toml uv.lock)")
+        self.assertTree(self.merge_tree(base, "v0.1.2"), self.tree(m))
+        # outside tag mode it is refused, as any merge that is not the automatic one
+        self.assertOutcome(FAIL, self.check(base, c), "conflicts")
+
+    def test_pyproject_without_a_lockfile(self):
+        r, base = self.build("pyproject", lockfile=False)
+        m = self.merge()
+        self.assertOutcome(PASS, self.check(base, m, tag="v0.1.2"), self.PICKED_OK.format("0.1.2"))
+        self.assertOutcome(PASS, self.check(base, self.open_cycle(), tag="v0.1.2"), "(pyproject.toml)")
+
+    def test_a_lockfile_without_the_projects_version_is_left_as_it_is(self):
+        r, base = self.build("pyproject", lock_project_version=False)
+        m = self.merge()
+        self.assertOutcome(PASS, self.check(base, m, tag="v0.1.2"), self.PICKED_OK.format("0.1.2"))
+
+    def test_package_json_with_package_lock_json(self):
+        r, base = self.build("package", lock_twin=True, after_fix=upgrade_twin)
+        m = self.merge()
+        self.assertIn('"version": "4.0.0"', r.g("show", f"{m}:package-lock.json"))
+        self.assertOutcome(PASS, self.check(base, m, tag="v3.5.2"), self.PICKED_OK.format("3.5.2"))
+        c = self.open_cycle()
+        self.assertOutcome(PASS, self.check(base, c, tag="v3.5.2"),
+                           "3.5.2 -> 3.5.3-dev0 (package-lock.json package.json)")
+        self.assertTree(self.merge_tree(base, "v3.5.2"), self.tree(m))
+
+    def test_package_json_with_crlf_line_endings(self):
+        r, base = self.build("package", crlf=True)
+        m = self.merge()
+        self.assertIn(b'"version": "3.5.2",\r\n', (r.releaser / "package-lock.json").read_bytes())
+        self.assertOutcome(PASS, self.check(base, m, tag="v3.5.2"), self.PICKED_OK.format("3.5.2"))
+        self.assertOutcome(PASS, self.check(base, self.open_cycle(), tag="v3.5.2"), "3.5.2 -> 3.5.3-dev0")
+        self.assertTree(self.merge_tree(base, "v3.5.2"), self.tree(m))
+
+    def test_version_txt(self):
+        # only main has changed VERSION.txt since the merge base: the automatic merge is clean
+        r, base = self.build("version-txt")
+        m = self.merge()
+        self.assertEqual(r.g("log", "-1", "--format=%P", m).split()[1], r.main_tip)
+        self.assertOutcome(PASS, self.check(base, m, tag="v0.23.2"), "tree of the merge equals the automatic merge (")
+        self.assertTree(self.merge_tree(base, "v0.23.2"), self.tree(m))
+        r.set_version(r.releaser, "0.23.3-dev")
+        r.g("commit", "-q", "-am", "chore: open 0.23.3-dev dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.23.2"), "skips the open cycle")
+
+    # refused
+    def test_a_hand_edit_in_the_merge_is_refused(self):
+        r, base = self.build("pyproject")
+        m = self.merge(edit=lambda wt: ReleasedRepo.edit(wt, "app.txt", "folded into the merge\n"))
+        self.assertOutcome(FAIL, self.check(base, m, tag="v0.1.2"),
+                           "differs from the automatic merge with the project's version lines of develop")
+
+        def requires(wt):
+            text = (wt / "pyproject.toml").read_text()
+            (wt / "pyproject.toml").write_text(text.replace('requires-python = ">=3.11"', 'requires-python = ">=3.9"'))
+        m = self.merge(edit=requires, name="back-merge-2")
+        self.assertOutcome(FAIL, self.check(base, m, tag="v0.1.2"),
+                           "differs from the automatic merge with the project's version lines of develop")
+
+    def test_a_merge_that_takes_develops_version_is_refused(self):
+        r, base = self.build("pyproject")
+        m = self.merge(take="develop")
+        self.assertEqual(r.version_at(m), "0.1.2.dev0")
+        self.assertOutcome(FAIL, self.check(base, m, tag="v0.1.2"),
+                           "differs from the automatic merge with the project's version lines of develop")
+
+    def test_a_conflict_outside_the_version_lines_is_refused(self):
+        # the pick changed a line that develop has changed again since
+        r, base = self.build("pyproject", fix=FIX_LINE_2, after_fix=rework_line_2)
+        m = self.merge()
+        self.assertOutcome(FAIL, self.check(base, m, tag="v0.1.2"), "conflicts in: app.txt")
+        result = self.merge_tree(base, "v0.1.2")
+        self.assertEqual(result.returncode, FAIL, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.splitlines()[-1].endswith(" conflicts in: app.txt"), result.stdout)
+
+    def test_a_version_line_outside_the_project_table_is_not_the_projects(self):
+        # the fixtures' setters write the first version line, here [tool.x]'s: that
+        # line is not set to main's, so it conflicts as in the automatic merge
+        r, base = self.build("pyproject", pyproject_head='[tool.x]\nversion = "0.0.9"\n\n')
+        m = self.merge()
+        self.assertOutcome(FAIL, self.check(base, m, tag="v0.1.2"), "conflicts in: pyproject.toml")
+
+    def test_more_than_one_merge_base_is_refused(self):
+        # v0.1.2 promoted from a develop that did not yet hold v0.1.1's back-merge,
+        # which then landed: each trunk holds a commit of the other that the other's
+        # side of it lacks, so the back-merge of the hotfix v0.1.3 has two merge bases
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject")
+        g = r.g
+        g("fetch", "-q", "origin")
+        feature_f = g("rev-parse", "origin/develop")
+        r.land_back_merge()
+        g("switch", "-q", "main")
+        g("merge", "-q", "--no-ff", feature_f, "-m", "Release: develop → main for v0.1.2")
+        r.set_version(r.releaser, "0.1.2")
+        g("commit", "-q", "-am", "release v0.1.2")
+        g("tag", "-a", "v0.1.2", "-m", "Release v0.1.2")
+        g("push", "-q", "origin", "main", "--follow-tags")
+        r.hotfix(version="0.1.3")
+        g("fetch", "-q", "origin")
+        base = g("rev-parse", "origin/develop")
+        self.assertEqual(len(g("merge-base", "--all", base, "origin/main").split()), 2)
+        m = self.merge()
+        self.assertOutcome(FAIL, self.check(base, m, tag="v0.1.3"), "2 merge bases")
+        result = self.merge_tree(base, "v0.1.3")
+        self.assertEqual(result.returncode, FAIL, result.stdout + result.stderr)
+        self.assertIn("2 merge bases", result.stdout.splitlines()[-1])
+        self.assertNotIn(" conflicts in: ", result.stdout.splitlines()[-1])
+
+    # how the merge is built
+    def test_the_check_needs_no_identity_and_signs_nothing(self):
+        # a CI runner may have no user configured, and a person's configuration may
+        # sign every commit; the merge base and develop rewritten are commits all the same
+        r, base = self.build("pyproject")
+        m = self.merge()
+        env = {"GIT_AUTHOR_NAME": "", "GIT_AUTHOR_EMAIL": "", "GIT_COMMITTER_NAME": "", "GIT_COMMITTER_EMAIL": "",
+               "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "user.useConfigOnly", "GIT_CONFIG_VALUE_0": "true",
+               "GIT_CONFIG_KEY_1": "commit.gpgSign", "GIT_CONFIG_VALUE_1": "true"}
+        self.assertOutcome(PASS, self.check(base, m, tag="v0.1.2", env=env), self.PICKED_OK.format("0.1.2"))
+
+    def test_no_ref_index_or_working_tree_is_touched(self):
+        r, base = self.build("pyproject")
+        m = self.merge()
+        g = r.g
+        before = (g("for-each-ref"), g("status", "--porcelain", "--untracked-files=all"), g("rev-parse", "HEAD"))
+        self.assertOutcome(PASS, self.check(base, m, tag="v0.1.2"))
+        self.assertTree(self.merge_tree(base, "v0.1.2"), self.tree(m))
+        self.assertEqual((g("for-each-ref"), g("status", "--porcelain", "--untracked-files=all"),
+                          g("rev-parse", "HEAD")), before)
+
+    def test_merge_tree_usage(self):
+        r, base = self.build("version-txt")
+        self.assertOutcome(ERROR, self.sb.script("back-merge-check", "--merge-tree", base, "origin/main",
+                                                 cwd=r.releaser), "back-merge-check --merge-tree <develop>")
+        self.assertOutcome(FAIL, self.merge_tree(base, "vfoo"), "'vfoo' is not a release tag")
+        self.assertOutcome(ERROR, self.merge_tree("0" * 40, "v0.23.2"), f"develop {'0' * 40} is not a commit")
+
+
+class PromotionRelease(CheckCase):
+    """A release made by promotion keeps the automatic merge alone (decision 6 (a)):
+    a version change that reached develop during the release is refused in tag mode
+    too, however the merge resolves it, and --merge-tree gives no tree for it."""
+
+    def test_a_version_change_during_the_release_is_refused_in_tag_mode(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject")
+        g = r.g
+        g("fetch", "-q", "origin")
+        g("switch", "-q", "develop")
+        g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, "0.1.1.dev1")
+        g("commit", "-q", "-am", "chore: dev build v0.1.1.dev1")
+        g("push", "-q", "origin", "develop")
+        base = g("rev-parse", "HEAD")
+        # resolved as the merge of a release picked onto main would set the lines
+        g("switch", "-q", "-c", "back-merge", base)
+        self.sb.run(["git", "merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop after v0.1.1"],
+                    r.releaser, check=False)
+        g("checkout", "-q", "--ours", "--", "pyproject.toml", "uv.lock")
+        r.set_version(r.releaser, "0.1.1")
+        g("add", "pyproject.toml", "uv.lock")
+        g("commit", "-q", "-m", "Back-merge: main → develop after v0.1.1")
+        m = g("rev-parse", "HEAD")
+        r.set_version(r.releaser, "0.1.2.dev0")
+        g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, m, tag="v0.1.1"), "conflicts")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "conflicts")
+        result = self.merge_tree(base, "v0.1.1")
+        self.assertEqual(result.returncode, FAIL, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.splitlines()[-1].endswith(" conflicts in: pyproject.toml uv.lock"),
+                        result.stdout)
+
+    def test_merge_tree_gives_the_automatic_merge(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject")
+        r.g("fetch", "-q", "origin")
+        base = r.g("rev-parse", "origin/develop")
+        auto = r.g("merge-tree", "--write-tree", base, "origin/main")
+        self.assertTree(self.merge_tree(base, "v0.1.1"), auto)
+
+
+class FastForwardFirstRelease(CheckCase):
+    """A first release that main reached by a fast-forward has no promotion commit, so
+    it counts as picked onto main; the automatic merge, tried first, passes it as before."""
+
+    def test_the_automatic_merge_passes(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject", first_release_by_fast_forward=True)
+        g = r.g
+        g("fetch", "-q", "origin")
+        self.assertEqual(g("tag", "--list"), "v0.1.1")
+        self.assertEqual(g("rev-list", "--merges", "origin/main"), "")
+        base = g("rev-parse", "origin/develop")
+        g("switch", "-q", "-c", "back-merge", base)
+        g("merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop after v0.1.1")
+        m = g("rev-parse", "HEAD")
+        r.set_version(r.releaser, "0.1.2.dev0")
+        g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(PASS, self.check(base, "HEAD", tag="v0.1.1"), "tree of the merge equals the automatic merge (")
+        self.assertTree(self.merge_tree(base, "v0.1.1"), g("rev-parse", f"{m}^{{tree}}"))
+
+
 class CopiesAgree(unittest.TestCase):
     """back-merge-check copies _sot.sh's reading at a commit rather than sourcing it
     (a pin's floor rises only with the pinned script's own file); the copies must agree."""
 
     @staticmethod
     def reading_lines(name):
-        from backmerge_support import SCRIPTS
         text = (SCRIPTS / name).read_text()
         return [l.strip() for l in text.splitlines()
                 if re.match(r"\s+(pyproject|package|version-txt)\)\s+git show", l)
