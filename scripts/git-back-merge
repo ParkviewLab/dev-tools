@@ -28,7 +28,11 @@
 # --merge-tree` gives, which in a code repository is the automatic merge with the
 # project's version lines of develop and the merge base set to main's, since the
 # plain merge conflicts on them by construction; the open-cycle commit follows as
-# for any release. Step 7, which refuses a version change that reached develop
+# for any release. Where that merge conflicts, the command refuses and prescribes
+# the exception ruled on 2026-09-27, the direct back-merge with administrators
+# unbound for its one push, the conflict resolved by hand: decision 6 (d)'s repair
+# would bring develop's side into agreement with main's, the hotfix's older side.
+# Step 7, which refuses a version change that reached develop
 # during a promotion, seeks the promotion only in the release's own segment of
 # main. Each step first tests whether it
 # has already been done, so a second run after an interruption resumes. A branch
@@ -394,7 +398,10 @@ picked_merge() {  # 8, for a release picked onto main: prints the merge commit M
     reason="${out##*$'\n'}"; reason="${reason#FAIL: }"; reason="${reason#ERROR: }"
     case "$reason" in
       *" conflicts in: "*)
-        die "the merge of origin/main into origin/develop conflicts in: ${reason##*" conflicts in: "}. $TAG is a release picked onto main, whose back-merge takes the project's version lines from main, so the conflict lies elsewhere. Repair it (decision 6 (d) of the real-merges design): an ordinary pull request into develop that brings develop's side of each conflicting passage into agreement with main's; once it has merged, run git back-merge again." ;;
+        # Decision 6 (d)'s repair brings develop's side of each conflicting passage
+        # into agreement with main's, which for a hotfix is the older side: it would
+        # undo develop's newer work on those lines. The owner ruled the exception.
+        die "the merge of origin/main into origin/develop conflicts in: ${reason##*" conflicts in: "}. $TAG is a release picked onto main, a hotfix, whose conflict decision 6 (d)'s repair would settle by undoing develop's newer work on those lines. Its back-merge is the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its one push, the conflict resolved by hand. Nothing is pushed." ;;
       *)
         die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG, a release picked onto main: $reason. Nothing is pushed. It needs a person: the exception for a back-merge that git back-merge refuses is the direct back-merge, with administrators unbound for its one push (ruled on 2026-09-27)." ;;
     esac

@@ -731,16 +731,31 @@ class PickedReleases(BackMergeCase):
         r = self.make_picked("version-txt")
         self.assertPicked(r, self.back_merge(), None)
 
-    def test_a_conflict_outside_the_version_lines_is_refused_with_its_repair(self):
-        # the pick changed a line that develop has changed again since
-        self.make_picked("pyproject", fix=FIX_LINE_2, after_fix=rework_line_2)
-        result = self.back_merge()
-        self.assertRefused(result, "conflicts in: app.txt")
-        self.assertIn("decision 6 (d)", result.stderr)
+    def assertTheException(self, result):
+        """Refused, prescribing the exception ruled on 2026-09-27 for a hotfix's conflict:
+        decision 6 (d)'s repair would bring develop's newer work on those lines back to
+        the hotfix's, and whether the conflict lies on a version line is not known."""
+        self.assertRefused(result, "the direct back-merge, with administrators unbound for its one push")
+        self.assertIn("the conflict resolved by hand", result.stderr)
+        self.assertNotIn("Repair it (decision 6 (d)", result.stderr)
         self.assertNotIn("decision 6 (a)", result.stderr)
+        self.assertNotIn("lies elsewhere", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertEqual(self.sb.gh_state()["prs"], [])
         self.assertNoResidue()
+
+    def test_a_conflict_is_refused_with_the_exception(self):
+        # the pick changed a line that develop has changed again since
+        self.make_picked("pyproject", fix=FIX_LINE_2, after_fix=rework_line_2)
+        result = self.back_merge()
+        self.assertIn("conflicts in: app.txt", result.stderr)
+        self.assertTheException(result)
+
+    def test_a_conflict_in_a_version_txt_repository_is_refused_with_the_exception(self):
+        self.make_picked("version-txt", fix=FIX_LINE_2, after_fix=rework_line_2)
+        result = self.back_merge()
+        self.assertIn("conflicts in: app.txt", result.stderr)
+        self.assertTheException(result)
 
     def test_more_than_one_merge_base_is_refused(self):
         # v0.1.2 promoted from a develop that did not yet hold v0.1.1's back-merge
