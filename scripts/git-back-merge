@@ -44,13 +44,14 @@
 # Step 7, which refuses a version change that reached develop during a
 # promotion, seeks the promotion on the tag's first-parent line as far as
 # origin/develop holds it, which is what the back-merge brings of main's own
-# history, an earlier release's promotion not yet back-merged included. Where
-# develop and main have more than one merge base, the command refuses only what
-# back-merge-check refuses, naming the exception: a picked release whose merge the
-# check does not give, and a promotion whose versions do not agree, for which
-# restoring develop's version would be the wrong repair; a promotion whose
-# versions agree is built with git merge --no-ff, as in v1.4.1, and the check
-# passes it where its tree is the automatic merge. Each step first tests whether it
+# history, an earlier release's promotion not yet back-merged included, and it
+# refuses any version difference it finds there, whether or not the merge would
+# conflict. Where develop and main have more than one merge base, the command
+# refuses a picked release whose merge the check does not give, and a promotion
+# whose versions do not agree, naming the exception, since restoring develop's
+# version would be the wrong repair there; a promotion whose versions agree is
+# built with git merge --no-ff, and the check passes it where its tree is the
+# automatic merge. Each step first tests whether it
 # has already been done, so a second run after an interruption resumes. A branch
 # that develop has moved beyond is rebuilt from the new develop when a run finds it
 # and, in a repository that requires up-to-date branches, when develop moves while
@@ -167,9 +168,9 @@ handbook_dir() {
 # switched in the section headed "Until a repository has switched"; its heading is
 # the contract between the two repositories. Until that section is released, the
 # section as handbook v0.27.0 released it gives the direct back-merge; it is found
-# by that heading exactly, and quoted only while it still gives it. No other
-# heading stands in for it: the section that replaced it describes the back-merge
-# pull request, and its text names `merge --no-ff` as well.
+# by that heading exactly, and quoted only while it still gives it. It quotes no
+# other section, such as the one on the back-merge pull request, whose text names
+# `merge --no-ff` as well.
 TRANSITION_HEADING="## Until a repository has switched"
 CASCADE_HEADING="## After the release: the back-merge cascade (mandatory)"
 section() {  # $1 = file, $2 = heading line; prints that section, heading included
@@ -425,8 +426,9 @@ picked_merge() {  # 8, for a release picked onto main: prints the merge commit M
   rc=0; out="$("$CHECK" --merge-tree "$base" origin/main "$TAG" 2>&1)" || rc=$?
   if [[ "$rc" != 0 ]]; then
     reason="${out##*$'\n'}"; reason="${reason#FAIL: }"; reason="${reason#ERROR: }"
-    # Exit 2 is an error of the check (a git before 2.40, a shallow clone), not a
-    # refusal of the back-merge, and no repair of the history mends it.
+    # Exit 2 is an error of the check (a git before 2.40, which has no merge-tree
+    # --merge-base), not a refusal of the back-merge, and no repair of the history
+    # mends it; a shallow repository was refused at step 1.
     [[ "$rc" == 1 ]] || die "back-merge-check --merge-tree could not run (exit $rc): $reason. Nothing is pushed."
     case "$reason" in
       "develop and main have "*" merge bases, "*)

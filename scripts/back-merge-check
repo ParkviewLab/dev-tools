@@ -72,10 +72,11 @@
 #      pyproject.toml's [project] table; in uv.lock, the first version line of
 #      the [[package]] block named for the project, its [project] table's name
 #      in main's pyproject.toml, normalised as PEP 503 gives it; package.json's
-#      top-level version; and in package-lock.json the root's version and
-#      packages[""]'s. Only the quoted
-#      value changes (quote style, spacing, a CR line ending and a missing last
-#      line feed are kept), and a file without such a line is left as it is.
+#      top-level version, recognised only where no nested object precedes it;
+#      and in package-lock.json the root's version and packages[""]'s. Only the
+#      quoted value changes (quote style, spacing, a CR line ending and a
+#      missing last line feed are kept), and a file without such a line is left
+#      as it is.
 #      A release is picked onto main when what the back-merge brings of main's
 #      own history, the tag's first-parent line as far as the base (develop's
 #      tip) holds it, has no merge commit whose second parent the base holds;
@@ -95,18 +96,19 @@
 #      (X.Y.(Z+1).dev0 for pyproject.toml, X.Y.(Z+1)-dev0 for package.json); a
 #      lockfile that records the project's version moves with it, and each line
 #      that changes is the project's own: the [project] table's version, the
-#      top-level version of package.json, and in a lockfile the project's entry,
-#      not a dependency's. Neither file may hold a NUL byte, and a submodule's
-#      ignore setting hides no change.
+#      top-level version of package.json (recognised only where no nested object
+#      precedes it, since a line's owner is the last line before it ending in
+#      "{"), and in a lockfile the project's entry, not a dependency's. Neither
+#      file may hold a NUL byte, and a submodule's ignore setting hides no
+#      change.
 #   5. In tag mode, as above.
 #   6. A shallow repository is refused outright.
 #
 # Versions are the project's own, read from the committed trees: [project].version
 # in pyproject.toml (parsed as TOML) and the top-level "version" in package.json
-# (parsed as JSON), as the version guard reads them, and VERSION.txt with its
-# whitespace stripped, where the guard compares it whole. A version file that
-# cannot be parsed, or that holds no such
-# version (a dynamic one, say), fails the check. The project's name, whose
+# (parsed as JSON), and VERSION.txt with its whitespace stripped. A version file
+# that cannot be parsed, or that holds no such version (a dynamic one, say), fails
+# the check. The project's name, whose
 # [[package]] block in uv.lock holds its locked version, is the [project] table's
 # name, read by the same parser and normalised as PEP 503 gives it. pyproject.toml
 # is parsed by python3 where it has tomllib (3.11 or later), as on the ubuntu
@@ -114,11 +116,13 @@
 # pyproject.toml repository requires; package.json by python3, else by node;
 # where nothing can parse the file, the check exits 2.
 # Exit 0 = pass, 1 = not a clean back-merge, 2 = usage or repository error (a
-# shallow clone, a git before 2.40, no parser for the version file); with
+# shallow clone, a git before 2.40 where a release picked onto main needs
+# `git merge-tree --merge-base`, no parser for the version file); with
 # --merge-tree, 0 = the tree is printed, 1 = there is none, 2 = such an error.
-# Portable to bash 3.2 (macOS) and bash 5 (the ubuntu runners). Needs git 2.40
-# or later, for `git merge-tree --merge-base`. See the handbook's releases.md
-# and ci.md.
+# Portable to bash 3.2 (macOS) and bash 5 (the ubuntu runners). Needs git 2.38
+# or later, for `git merge-tree --write-tree`, and 2.40 or later where a release
+# picked onto main needs its `--merge-base`. See the handbook's releases.md and
+# ci.md.
 
 set -euo pipefail
 export LC_ALL=C   # byte-wise awk comparisons: macOS awk compares strings with strcoll
@@ -175,7 +179,7 @@ TMPD=$(mktemp -d "${TMPDIR:-/tmp}/back-merge-check.XXXXXX") || die "cannot make 
 trap 'rm -rf "$TMPD"' EXIT
 case "$TMPD" in /*) ;; *) TMPD="$PWD/$TMPD" ;; esac   # absolute, for GIT_INDEX_FILE
 
-# --- version reading, from committed trees, as the version guard reads them ---
+# --- version reading, from committed trees ---
 # The same reading as _sot.sh's sot_kind_at, sot_project_reader and sot_read_at,
 # copied rather than sourced: a workflow pin's floor rises only with a change to
 # the pinned script's own file (the handbook's ci.md), so every change to this

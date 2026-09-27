@@ -32,7 +32,7 @@ sot_read() {  # echoes the current version
 # --- detection and read at a commit ------------------------------------------
 # From a committed tree rather than the working tree, so that git-back-merge can
 # read origin/main and origin/develop without checking them out; read as sot_read
-# reads the working tree and as the version guard reads it: the project's own
+# reads the working tree: the project's own
 # version, [project].version in pyproject.toml (parsed as TOML) and the top-level
 # "version" in package.json (parsed as JSON), and VERSION.txt with its whitespace
 # removed. A file that cannot be parsed, or that holds no such version (a dynamic
