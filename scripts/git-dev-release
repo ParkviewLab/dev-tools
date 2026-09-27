@@ -37,14 +37,16 @@
 # X.Y.(Z+2).dev0, or -dev0 for package.json) and committing it, and its one push
 # of develop carries the merge commit too. It refuses unless develop then carries
 # the version of main's newest release (the highest vX.Y.Z tag on origin/main,
-# fetched with the tags), the state the exception's merge leaves once its version
-# lines are resolved to main's: a develop at any other version, its placeholder
-# among them, has not had that merge. Where GitHub refuses that push because
-# administrators are bound, it says to switch enforce_admins off for the one push.
-# --direct is allowed only with --open, and changes nothing in a repository that
-# has not switched. A repository whose version is in VERSION.txt has no dev build
-# and skips the open cycle. See the handbook's releases.md ("Development
-# versioning") and ci.md (dev-release.yml).
+# fetched with the tags) and holds that release's commit, the state the
+# exception's merge leaves once its version lines are resolved to main's: a
+# develop at any other version, its placeholder among them, has not had that
+# merge, and neither has one at that version without the commit, whose version was
+# set by hand. Where GitHub refuses that push because administrators are bound, it
+# says to switch enforce_admins off for the one push. --direct is allowed only
+# with --open, and changes nothing in a repository that has not switched. A
+# repository whose version is in VERSION.txt has no dev build and skips the open
+# cycle. See the handbook's releases.md ("Development versioning") and ci.md
+# (dev-release.yml).
 
 set -euo pipefail
 
@@ -177,9 +179,10 @@ cur="$(sot_read)"
 
 # --- the exception's merge: --direct pushes only a develop at main's newest release ---
 # The exception's merge, its version lines resolved to main's, leaves develop at the
-# version of main's newest release (the highest vX.Y.Z tag on origin/main). A develop
-# at any other version has not had that merge, and a direct push of it would be a
-# push to develop outside the exception.
+# version of main's newest release (the highest vX.Y.Z tag on origin/main), holding
+# that release's commit. A develop at any other version, or at that version without
+# the commit, which a version set by hand leaves, has not had that merge, and a
+# direct push of it would be a push to develop outside the exception.
 if [[ "$SWITCHED_DIRECT" == 1 ]]; then
   if ! out="$(git fetch --tags origin main 2>&1)"; then
     printf '%s\n' "$out" >&2
@@ -193,6 +196,17 @@ if [[ "$SWITCHED_DIRECT" == 1 ]]; then
   fi
   if [[ "$cur" != "${rel#v}" ]]; then
     echo "git dev-release: the local develop's version is $cur, not ${rel#v}, the version of main's newest release ($rel): --direct opens the cycle only after the direct back-merge of the exception ruled on 2026-09-27, whose merge leaves develop at that version once its version lines are resolved to main's. Nothing is committed or pushed." >&2
+    exit 1
+  fi
+  # the version alone could have been set by hand: the merge brings the release itself
+  relc="$(git rev-parse --verify --quiet "refs/tags/$rel^{commit}")" \
+    || { echo "git dev-release: git cannot read the commit of $rel. Nothing is committed or pushed." >&2; exit 1; }
+  rc=0; git merge-base --is-ancestor "$relc" HEAD || rc=$?
+  if [[ "$rc" == 1 ]]; then
+    echo "git dev-release: the local develop's version is $cur, the version of main's newest release ($rel), but it does not hold that release's commit ($(git rev-parse --short "$relc")): the exception's merge is missing. --direct opens the cycle only after the direct back-merge of the exception ruled on 2026-09-27, whose merge of main brings that commit into develop. Nothing is committed or pushed." >&2
+    exit 1
+  elif [[ "$rc" != 0 ]]; then
+    echo "git dev-release: git cannot tell whether the local develop holds $rel (git merge-base exited $rc). Nothing is committed or pushed." >&2
     exit 1
   fi
 fi

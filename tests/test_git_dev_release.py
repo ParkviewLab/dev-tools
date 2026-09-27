@@ -9,8 +9,8 @@ where the workflow declares the input, it dispatches with it and commits nothing
 Once merge commits are allowed, develop takes no direct push, so --open and a dev
 build without the input are refused, except that --open --direct opens the cycle by
 a direct push after the exception's direct back-merge, carrying its merge commit in
-the same push, and only on a develop at the version of main's newest release, which
-that merge leaves. A VERSION.txt repository has no dev build.
+the same push, and only on a develop at the version of main's newest release and
+holding its commit, which that merge leaves. A VERSION.txt repository has no dev build.
 """
 
 from __future__ import annotations
@@ -227,7 +227,8 @@ class TheException(DevReleaseCase):
     administrators unbound for its one push: in a repository that allows merge commits
     it opens the cycle by a direct push, as --open does before the switch, and that one
     push carries the hand-made merge commit as well. It refuses a develop that does not
-    carry the version of main's newest release, which that merge leaves."""
+    carry the version of main's newest release or does not hold its commit, both of
+    which that merge leaves."""
 
     def hand_made_back_merge(self):
         """A hotfix released; in the develop worktree, the exception's merge of main, its
@@ -271,7 +272,7 @@ class TheException(DevReleaseCase):
 
     # --direct is for the exception alone: the develop it pushes must carry the version
     # of main's newest release, which the exception's merge leaves once its version
-    # lines are resolved to main's
+    # lines are resolved to main's, and hold that release's commit, which it brings
 
     def develop_at_its_placeholder(self, kind):
         """A hotfix released and no back-merge made: the develop worktree, pulled, is at
@@ -307,6 +308,28 @@ class TheException(DevReleaseCase):
     def test_refused_on_a_package_develop_at_its_placeholder(self):
         self.develop_at_its_placeholder("package")
         self.assertRefusedBeforeTheExceptionsMerge("3.5.2-dev0", "3.5.2")
+
+    def test_refused_where_the_version_was_set_by_hand_without_the_merge(self):
+        # develop's version lines set to the release's by hand, main not merged: the
+        # version agrees, and develop does not hold the release's commit
+        r = self.develop_at_its_placeholder("pyproject")
+        r.set_version(r.dev, "0.1.2")
+        self.sb.git(r.dev, "commit", "-q", "-am", "chore: set develop's version to 0.1.2")
+        head = self.sb.git(r.dev, "rev-parse", "HEAD")
+        short = self.sb.git(r.dev, "rev-parse", "--short", r.tag3_commit)
+        for args in (("--open", "--direct"), ("--dry-run", "--open", "--direct")):
+            res = self.dev_release(*args)
+            self.assertEqual(res.returncode, 1, self.out(res))
+            self.assertIn("git dev-release: the local develop's version is 0.1.2, the version of main's newest release"
+                          f" (v0.1.2), but it does not hold that release's commit ({short}): the exception's merge is"
+                          " missing. --direct opens the cycle only after the direct back-merge of the exception ruled"
+                          " on 2026-09-27, whose merge of main brings that commit into develop. Nothing is committed"
+                          " or pushed.", res.stderr)
+            self.assertNotIn("new:", res.stdout)
+        self.assertEqual(self.sb.git(r.dev, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.sb.git(r.dev, "status", "--porcelain"), "")
+        self.assertDevelopUnchanged()
+        self.assertEqual(self.dispatches(), [])
 
     def test_the_newest_release_is_read_from_origin(self):
         # a develop worktree that has not fetched the hotfix's tag still finds it
