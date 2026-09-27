@@ -29,9 +29,8 @@
 # Once a repository allows merge commits, develop takes no direct push: the open
 # cycle arrives as the second commit of the back-merge pull request (`git
 # back-merge`), so --open refuses there, and so does a dev build whose workflow
-# lacks the `kind` input. The one exception is the direct back-merge (the
-# handbook's releases.md, "The release's last step: the back-merge pull
-# request"), made where git back-merge refuses, with administrators unbound for
+# lacks the `kind` input. The one exception is the direct back-merge ruled on
+# 2026-09-27, made where git back-merge refuses, with administrators unbound for
 # its one push: after its merge, made and resolved by hand in the develop
 # worktree, `--open --direct` does what --open does before the switch, writing the
 # next-patch placeholder after the release develop then carries (X.Y.(Z+1) becomes
@@ -71,7 +70,7 @@ for a in "$@"; do
   esac
 done
 if [[ "$DIRECT" == 1 && "$OPEN" == 0 ]]; then
-  echo "git dev-release: --direct is allowed only with --open: it opens the next cycle by a direct push, after the direct back-merge of the exception (the handbook's releases.md, \"The release's last step: the back-merge pull request\")" >&2
+  echo "git dev-release: --direct is allowed only with --open: it opens the next cycle by a direct push, after the direct back-merge of the exception ruled on 2026-09-27" >&2
   usage >&2; exit 1
 fi
 
@@ -156,12 +155,12 @@ SWITCHED_DIRECT=0
 if [[ "$allowed" == true && "$OPEN" == 1 && "$DIRECT" == 1 ]]; then
   # the exception: after its direct back-merge, the cycle opens by a direct push
   SWITCHED_DIRECT=1
-  echo "$slug allows merge commits; --direct opens the cycle by a direct push, after the direct back-merge of the exception (the handbook's releases.md, \"The release's last step: the back-merge pull request\")"
+  echo "$slug allows merge commits; --direct opens the cycle by a direct push, after the direct back-merge of the exception ruled on 2026-09-27"
 elif [[ "$allowed" == true ]]; then
   if [[ "$OPEN" == 1 ]]; then
-    echo "git dev-release: $slug allows merge commits, so develop takes no direct push: the open cycle arrives as the second commit of the back-merge pull request. After a release, run git back-merge. Where its back-merge is the exception (the handbook's releases.md, \"The release's last step: the back-merge pull request\"), the direct back-merge with administrators unbound for its one push, open the cycle after its merge with git dev-release --open --direct." >&2
+    echo "git dev-release: $slug allows merge commits, so develop takes no direct push: the open cycle arrives as the second commit of the back-merge pull request. After a release, run git back-merge. Where its back-merge is the exception ruled on 2026-09-27, the direct back-merge with administrators unbound for its one push, open the cycle after its merge with git dev-release --open --direct." >&2
   else
-    echo "git dev-release: $slug allows merge commits, so develop takes no direct push, and its dev-release.yml on origin/develop declares no kind input: re-assemble it from the dev-release parts of the handbook's ci.md, \"dev-release.yml — on-demand dev build\", and run git dev-release again." >&2
+    echo "git dev-release: $slug allows merge commits, so develop takes no direct push, and its dev-release.yml on origin/develop declares no kind input: re-assemble it from the dev-release parts of a handbook release whose gate takes the kind input, and run git dev-release again." >&2
   fi
   exit 1
 fi
@@ -192,11 +191,11 @@ if [[ "$SWITCHED_DIRECT" == 1 ]]; then
   fi
   rel="$(git tag -l 'v*' --merged origin/main --sort=-v:refname | LC_ALL=C awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ && !n { print; n = 1 }')"
   if [[ -z "$rel" ]]; then
-    echo "git dev-release: origin/main holds no release tag vX.Y.Z, so the local develop cannot carry the version of main's newest release: --direct opens the cycle only after the direct back-merge of the exception (the handbook's releases.md, \"The release's last step: the back-merge pull request\"). Nothing is committed or pushed." >&2
+    echo "git dev-release: origin/main holds no release tag vX.Y.Z, so the local develop cannot carry the version of main's newest release: --direct opens the cycle only after the direct back-merge of the exception ruled on 2026-09-27. Nothing is committed or pushed." >&2
     exit 1
   fi
   if [[ "$cur" != "${rel#v}" ]]; then
-    echo "git dev-release: the local develop's version is $cur, not ${rel#v}, the version of main's newest release ($rel): --direct opens the cycle only after the direct back-merge of the exception (the handbook's releases.md, \"The release's last step: the back-merge pull request\"), whose merge leaves develop at that version once its version lines are resolved to main's. Nothing is committed or pushed." >&2
+    echo "git dev-release: the local develop's version is $cur, not ${rel#v}, the version of main's newest release ($rel): --direct opens the cycle only after the direct back-merge of the exception ruled on 2026-09-27, whose merge leaves develop at that version once its version lines are resolved to main's. Nothing is committed or pushed." >&2
     exit 1
   fi
   # the version alone could have been set by hand: the merge brings the release itself
@@ -204,7 +203,7 @@ if [[ "$SWITCHED_DIRECT" == 1 ]]; then
     || { echo "git dev-release: git cannot read the commit of $rel. Nothing is committed or pushed." >&2; exit 1; }
   rc=0; git merge-base --is-ancestor "$relc" HEAD || rc=$?
   if [[ "$rc" == 1 ]]; then
-    echo "git dev-release: the local develop's version is $cur, the version of main's newest release ($rel), but it does not hold that release's commit ($(git rev-parse --short "$relc")): the exception's merge is missing. --direct opens the cycle only after the direct back-merge of the exception (the handbook's releases.md, \"The release's last step: the back-merge pull request\"), whose merge of main brings that commit into develop. Nothing is committed or pushed." >&2
+    echo "git dev-release: the local develop's version is $cur, the version of main's newest release ($rel), but it does not hold that release's commit ($(git rev-parse --short "$relc")): the exception's merge is missing. --direct opens the cycle only after the direct back-merge of the exception ruled on 2026-09-27, whose merge of main brings that commit into develop. Nothing is committed or pushed." >&2
     exit 1
   elif [[ "$rc" != 0 ]]; then
     echo "git dev-release: git cannot tell whether the local develop holds $rel (git merge-base exited $rc). Nothing is committed or pushed." >&2
