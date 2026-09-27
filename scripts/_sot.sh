@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # _sot.sh — version Source-of-Truth helpers for the ParkviewLab git-* release scripts.
-# Sourced (not run) by git-bump, git-release, git-dev-release. NOT executable, so
-# install.sh does not symlink it as a `git-` command.
+# Sourced (not run) by git-bump, git-release, git-dev-release, git-back-merge. NOT
+# executable, so install.sh does not symlink it as a `git-` command.
 #
 # Three SoT shapes, auto-detected: pyproject.toml ([project].version), package.json
 # (version), and a top-level VERSION.txt. See the handbook's releases.md.
@@ -29,16 +29,41 @@ sot_read() {  # echoes the current version
   esac
 }
 
+# --- detection and read at a commit ------------------------------------------
+# From a committed tree rather than the working tree, read as the version guard
+# reads it (the first `version` line), so that git-back-merge can read origin/main
+# and origin/develop without checking them out. back-merge-check carries its own
+# copy rather than sourcing this file: a workflow pin's floor rises only with a
+# change to the pinned script's own file (the handbook's ci.md), so a change to
+# the check's behaviour must be a change to scripts/back-merge-check. The two
+# copies are kept equal by hand. Each reader in these pipelines reads
+# to the end of its input: one that stops early (head -1, awk's exit) can leave
+# git show to die of SIGPIPE, and under pipefail the pipeline then fails.
+sot_kind_at() {  # $1 = commit; echoes pyproject | package | version-txt | none
+  if   git cat-file -e "$1:pyproject.toml" 2>/dev/null; then echo pyproject
+  elif git cat-file -e "$1:package.json"   2>/dev/null; then echo package
+  elif git cat-file -e "$1:VERSION.txt"    2>/dev/null; then echo version-txt
+  else echo none; fi
+}
+
+sot_read_at() {  # $1 = commit, $2 = kind (from sot_kind_at); echoes the version there
+  case "$2" in
+    pyproject)   git show "$1:pyproject.toml" | awk '!f && /^version *=/{print; f=1}' | sed -E "s/^version *= *[\"']([^\"']*)[\"'].*/\\1/" ;;
+    package)     git show "$1:package.json" | awk '!f && /"version" *:/{print; f=1}' | sed -E 's/.*"version" *: *"([^"]*)".*/\1/' ;;
+    version-txt) git show "$1:VERSION.txt" | tr -d '[:space:]' ;;
+  esac
+}
+
 # --- write -----------------------------------------------------------------
-sot_write() {  # $1 = new version. writes it; echoes the file(s) to `git add`.
+sot_write() {  # $1 = new version. writes it; echoes the file(s) to `git add`; 1 if the writer fails.
   local v="$1" files
   case "$(sot_kind)" in
     pyproject)
-      uv version "$v" >/dev/null
+      uv version "$v" >/dev/null || return 1
       files="pyproject.toml"
       [[ -n "$(git status --porcelain uv.lock 2>/dev/null)" ]] && files="$files uv.lock" ;;
     package)
-      npm version "$v" --no-git-tag-version --allow-same-version >/dev/null
+      npm version "$v" --no-git-tag-version --allow-same-version >/dev/null || return 1
       files="package.json"
       [[ -n "$(git status --porcelain package-lock.json 2>/dev/null)" ]] && files="$files package-lock.json" ;;
     version-txt)
@@ -80,7 +105,7 @@ sot_compute_next() {
   esac
 }
 
-# --- dev versions (for git-dev-release) ------------------------------------
+# --- dev versions (for git-dev-release, and git back-merge's placeholder) --
 sot_dev_n() {  # echoes the .devN / -devN number in $1, or -1 if none
   case "$1" in
     *.dev[0-9]*) echo "${1##*.dev}" ;;

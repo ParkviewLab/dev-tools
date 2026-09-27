@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# git back-merge [--dry-run] [<tag>]
+#
+# The last step of a release in a repository that merges pull requests with merge
+# commits: it brings the release on main back into develop through a pull request
+# that develop's required checks examine (the version guard's back-merge mode among
+# them, in a repository that has switched), rather than by a direct push. Run it from any worktree of the repository, under the
+# release ask, which covers this command's merge of its own pull request and its
+# force push of its own back-merge-<tag> branch, and nothing else.
+#
+#   git back-merge             # the newest release tag vX.Y.Z
+#   git back-merge v1.2.3      # a named release tag, which must be main's version
+#   git back-merge --dry-run   # build and check locally; push, open and merge nothing
+#
+# In a temporary worktree it builds back-merge-<tag> from origin/develop with
+# `git merge --no-ff origin/main`, adds in a code repository the open-cycle commit
+# (the next-patch placeholder, X.Y.(Z+1).dev0 or X.Y.(Z+1)-dev0, written by _sot.sh),
+# checks the result with back-merge-check, pushes it, opens the pull request
+# labelled release-bookkeeping, closes any open back-merge pull request of an
+# older tag, waits for develop's required checks, and merges it with --merge
+# --match-head-commit, never --admin. Each step first tests whether it
+# has already been done, so a second run after an interruption resumes. A branch
+# that develop has moved beyond is rebuilt from the new develop, never updated with
+# GitHub's "Update branch". A repository that does not yet allow merge commits
+# still ends its release with the direct back-merge; there the command refuses and
+# quotes the released handbook. See the handbook's releases.md and branching.md.
+#
+# Environment: GIT_BACK_MERGE_POLL (seconds between polls, default 15),
+# GIT_BACK_MERGE_TIMEOUT (seconds to wait for the release run and for the checks,
+# default 3600), PARKVIEWLAB_HANDBOOK (the released handbook's worktree, default
+# <org root>/handbook/handbook-main).
+
+set -euo pipefail
+
+# Resolve our real directory (through the install.sh symlink) to source _sot.sh.
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"; _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+SCRIPTS_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
+source "$SCRIPTS_DIR/_sot.sh"
+CHECK="$SCRIPTS_DIR/back-merge-check"
+
+POLL="${GIT_BACK_MERGE_POLL:-15}"
+TIMEOUT="${GIT_BACK_MERGE_TIMEOUT:-3600}"
+MAX_REBUILDS=3
+LABEL=release-bookkeeping
+TAB="$(printf '\t')"
+
+usage() { echo "usage: git back-merge [--dry-run] [<tag>]"; }
+say()   { echo "git back-merge: $*"; }
+die()   { echo "git back-merge: $*" >&2; exit 1; }
+step()  { echo; echo "== $*"; }
+
+DRY=0; TAG=""
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) usage >&2; exit 2 ;;
+    *)  [[ -z "$TAG" ]] || { usage >&2; exit 2; }; TAG="$a" ;;
+  esac
+done
+
+is_release_tag() { [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+ancestor() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }
+
+# --- the temporary worktree, removed however the command ends ------------------
+# The build runs on a detached HEAD and is pushed by its commit id, so no local
+# branch exists to collide with a worktree left by a killed run or opened by hand.
+TMP=""; WT=""; BR=""
+drop_worktree() {
+  if [[ -n "$WT" && -d "$WT" ]]; then git worktree remove --force "$WT" >/dev/null 2>&1 || true; fi
+  WT=""
+  if [[ -n "$TMP" ]]; then rm -rf "$TMP"; TMP=""; fi
+  git worktree prune >/dev/null 2>&1 || true
+}
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/git-back-merge-errors.XXXXXX")"   # gh's error text
+cleanup() { drop_worktree; rm -rf "$SCRATCH"; }
+trap cleanup EXIT
+
+# --- 1. fetch ------------------------------------------------------------------
+git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
+git remote get-url origin >/dev/null 2>&1 || die "this repository has no remote named origin"
+COMMON="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+step "1. fetch origin"
+git fetch --quiet --prune --tags origin
+git rev-parse -q --verify refs/remotes/origin/main >/dev/null || die "origin has no main branch"
+git rev-parse -q --verify refs/remotes/origin/develop >/dev/null || die "origin has no develop branch"
+
+origin_url="$(git remote get-url origin)"
+case "$origin_url" in
+  git@github.com:*)      SLUG="${origin_url#git@github.com:}" ;;
+  https://github.com/*)  SLUG="${origin_url#https://github.com/}" ;;
+  ssh://git@github.com/*) SLUG="${origin_url#ssh://git@github.com/}" ;;
+  # gh repo view without an argument names gh's base repository, which prefers
+  # a remote named upstream; given origin's URL, it names origin's repository
+  *) SLUG="$(gh repo view "$origin_url" --json nameWithOwner --jq .nameWithOwner 2>/dev/null \
+             || gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "gh cannot name the repository; is gh logged in?" ;;
+esac
+SLUG="${SLUG%.git}"; SLUG="${SLUG%/}"
+export GH_REPO="$SLUG"   # every gh call acts on the repository the pushes go to
+say "repository $SLUG"
+
+# --- 2. choose the tag -------------------------------------------------------------
+step "2. choose the tag"
+if [[ -z "$TAG" ]]; then
+  TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+  [[ -n "$TAG" ]] || die "no release tag vX.Y.Z in this repository"
+fi
+is_release_tag "$TAG" || die "'$TAG' is not a release tag vX.Y.Z"
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "no tag $TAG"
+TAGC="$(git rev-parse "$TAG^{commit}")"
+ancestor "$TAGC" origin/main || die "$TAG is not on origin/main"
+KIND="$(sot_kind_at origin/main)"
+[[ "$KIND" != none ]] || die "origin/main has no version file _sot.sh reads (pyproject.toml, package.json or VERSION.txt)"
+V_MAIN="$(sot_read_at origin/main "$KIND")"
+[[ "v$V_MAIN" == "$TAG" ]] || die "origin/main's version is $V_MAIN, not $TAG's: name the tag of the newest release, or see what reached main after $TAG"
+BR="back-merge-$TAG"
+say "$TAG ($(git rev-parse --short "$TAGC")); the branch is $BR"
+
+# --- 3. refuse where the switch has not happened ----------------------------------------
+handbook_dir() {
+  if [[ -n "${PARKVIEWLAB_HANDBOOK:-}" ]]; then echo "$PARKVIEWLAB_HANDBOOK"; return; fi
+  echo "$(dirname "$(dirname "$COMMON")")/handbook/handbook-main"
+}
+# The handbook's releases.md gives the release's end for a repository that has not
+# switched in the section headed "Until a repository has switched"; its heading is
+# the contract between the two repositories. Until that section is released, the
+# section "After the release" gives the direct back-merge, and is quoted only while
+# it still does.
+TRANSITION_HEADING="## Until a repository has switched"
+section() {  # $1 = file, $2 = heading line; prints that section, heading included
+  awk -v h="$2" '$0==h{p=1; print; next} p && /^## /{exit} p{print}' "$1"
+}
+quote_transition() {  # the released handbook's text for a repository not yet switched
+  local f heading url
+  f="$(handbook_dir)/docs/releases.md"
+  url="https://github.com/ParkviewLab/handbook/blob/main/docs/releases.md"
+  if [[ ! -f "$f" ]]; then echo "  $url"; return; fi
+  heading="$(awk -v h="$TRANSITION_HEADING" '!f && $0==h{print; f=1}' "$f")"
+  if [[ -z "$heading" ]]; then
+    heading="$(awk '!f && /^## After the release/{print; f=1}' "$f")"
+    if [[ -n "$heading" ]] && ! section "$f" "$heading" | grep -F 'merge --no-ff' >/dev/null; then heading=""; fi
+  fi
+  if [[ -z "$heading" ]]; then echo "  $f (or $url): the section \"${TRANSITION_HEADING#"## "}\""; return; fi
+  echo "  (from $f)"
+  section "$f" "$heading" | sed 's/^/  /'
+  if [[ "$heading" != "$TRANSITION_HEADING" ]]; then
+    echo "  Then, in a repository whose version is in pyproject.toml or package.json, open the next cycle: git dev-release --open (releases.md, \"Development versioning\")."
+  fi
+}
+step "3. the switch"
+AMC="$(gh api "repos/$SLUG" --jq .allow_merge_commit)" || die "gh cannot read $SLUG's settings"
+case "$AMC" in
+  true|false) ;;
+  *) die "gh read no allow_merge_commit setting for $SLUG ('$AMC'); GitHub returns it only to a caller with admin rights on the repository" ;;
+esac
+if [[ "$AMC" != true ]]; then
+  {
+    echo "git back-merge: $SLUG does not allow merge commits, so it has not switched to real merges."
+    echo "Its release ends with the direct back-merge, as the released handbook gives it:"
+    echo
+    quote_transition
+  } >&2
+  exit 1
+fi
+KIND_DEV="$(sot_kind_at origin/develop)"
+[[ "$KIND_DEV" != none ]] || die "origin/develop has no version file _sot.sh reads (pyproject.toml, package.json or VERSION.txt)"
+[[ "$KIND_DEV" == "$KIND" ]] || die "origin/develop's version file ($KIND_DEV) is not origin/main's ($KIND)"
+version_file() { case "$KIND" in pyproject) echo pyproject.toml ;; package) echo package.json ;; *) echo VERSION.txt ;; esac; }
+say "merge commits allowed; version file: $(version_file)"
+
+# --- 4. wait for the release --------------------------------------------------------------
+# Every workflow run for the tagged commit must have concluded. A release run whose
+# only failed job is `changelog` is accepted once the repair is in place: the
+# changelog commit on origin/main and a GitHub Release for the tag.
+WRITES_CHANGELOG=0; HAS_RELEASE_WF=0
+if git cat-file -e "$TAGC:.github/workflows/release.yml" 2>/dev/null; then
+  HAS_RELEASE_WF=1
+  if git show "$TAGC:.github/workflows/release.yml" | grep -F 'docs(changelog)' >/dev/null; then WRITES_CHANGELOG=1; fi
+fi
+CHANGELOG_SUBJECT="docs(changelog): $TAG [skip ci]"
+runs_for_tag() {
+  gh run list --commit "$TAGC" --limit 100 \
+    --json databaseId,status,conclusion,headBranch,workflowName \
+    --jq '.[] | [(.databaseId|tostring), .status, (.conclusion // ""), .headBranch, .workflowName] | @tsv'
+}
+step "4. the release's workflow runs"
+deadline=$(( $(date +%s) + TIMEOUT ))
+while :; do
+  pending=""
+  if ! RUNS="$(runs_for_tag)"; then
+    if [[ "$DRY" == 1 ]]; then say "(dry run) gh cannot list the workflow runs for $TAG; not waiting"; RUNS=""; break; fi
+    (( $(date +%s) < deadline )) || die "gh cannot list the workflow runs for $TAG"
+    say "gh cannot list the workflow runs for $TAG; retrying"
+    sleep "$POLL"; continue
+  fi
+  if [[ "$HAS_RELEASE_WF" == 1 ]] && ! printf '%s\n' "$RUNS" | awk -F"$TAB" -v t="$TAG" '$4==t{f=1} END{exit !f}'; then
+    pending="the release run for $TAG has not started"
+  fi
+  inprog="$(printf '%s\n' "$RUNS" | awk -F"$TAB" 'NF && $2!="completed"{print $5 " (" $1 ", " $2 ")"}')"
+  [[ -z "$inprog" ]] || pending="${pending:+$pending; }still running: $(echo $inprog)"
+  [[ -n "$pending" ]] || break
+  if [[ "$DRY" == 1 ]]; then say "(dry run) not waiting: $pending"; break; fi
+  (( $(date +%s) < deadline )) || die "timed out waiting for the release: $pending"
+  say "waiting: $pending"
+  sleep "$POLL"
+done
+REPAIRED=0
+while IFS="$TAB" read -r id status concl branch name; do
+  [[ -n "$id" && "$status" == completed ]] || continue
+  case "$concl" in success|skipped|neutral) continue ;; esac
+  if [[ "$branch" == "$TAG" ]]; then
+    failed="$(gh run view "$id" --json jobs --jq '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | .name')" \
+      || die "gh cannot read the jobs of run $id"
+    if [[ "$failed" == changelog ]]; then REPAIRED=1; continue; fi
+  fi
+  die "the run '$name' ($id) for $TAG concluded '$concl'; repair the release before its back-merge"
+done <<EOF
+$RUNS
+EOF
+git fetch --quiet --prune --tags origin   # the changelog commit lands on main during the run
+if [[ "$WRITES_CHANGELOG" == 1 || "$REPAIRED" == 1 ]]; then
+  subjects="$(git log --format=%s "$TAGC..origin/main")"
+  if ! printf '%s\n' "$subjects" | grep -xF "$CHANGELOG_SUBJECT" >/dev/null; then
+    if [[ "$DRY" == 1 ]]; then say "(dry run) '$CHANGELOG_SUBJECT' is not yet on origin/main"
+    else die "'$CHANGELOG_SUBJECT' is not on origin/main; the release's changelog job has not landed its commit. If the job failed, repair the release as the handbook's releases.md gives it (\"Repairing a release whose changelog job failed\"), then run git back-merge again"; fi
+  fi
+fi
+if [[ "$REPAIRED" == 1 ]]; then
+  gh release view "$TAG" --json tagName --jq .tagName >/dev/null 2>&1 \
+    || die "the release run's changelog job failed, and $TAG has no GitHub Release: repair the release first (the handbook's releases.md, \"Repairing a release whose changelog job failed\")"
+  say "the release run's changelog job failed and was repaired by hand; accepted"
+fi
+V_MAIN="$(sot_read_at origin/main "$KIND")"
+[[ "v$V_MAIN" == "$TAG" ]] || die "origin/main's version is now $V_MAIN, not $TAG's"
+say "the release has concluded"
+
+# --- 5. stop if done ----------------------------------------------------------------------
+finish() {  # 13. clean up and sync
+  step "13. clean up and sync"
+  drop_worktree
+  git fetch --quiet --prune origin
+  local devwt
+  devwt="$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0=="branch refs/heads/develop"{print w}')"
+  if [[ -n "$devwt" ]]; then
+    if [[ -z "$(git -C "$devwt" status --porcelain)" ]]; then
+      git -C "$devwt" pull --quiet --ff-only && say "fast-forwarded $devwt" || say "could not fast-forward $devwt; pull it by hand"
+    else
+      say "$devwt has local changes; not pulled"
+    fi
+  fi
+  if ancestor "$TAGC" origin/develop; then
+    say "origin/develop carries $TAG; its version is $(sot_read_at origin/develop "$KIND")"
+  fi
+  # The open working branches that do not yet contain the new develop: every
+  # branch on origin but the long-lived ones and the back-merge branches, each
+  # with its pull request where it has one, and any fork's pull request into develop.
+  local prs n head oid cross ref b behind=""
+  prs="$(gh pr list --base develop --state open --limit 100 --json number,headRefName,headRefOid,isCrossRepository \
+          --jq '.[] | [(.number|tostring), .headRefName, .headRefOid, (.isCrossRepository|tostring)] | @tsv' 2>/dev/null || true)"
+  while IFS= read -r ref; do
+    b="${ref#refs/remotes/origin/}"
+    case "$b" in HEAD|main|develop|live|staging|back-merge-v*) continue ;; esac
+    ancestor origin/develop "$ref" && continue
+    n="$(printf '%s\n' "$prs" | awk -F"$TAB" -v h="$b" '!f && $2==h && $4=="false"{print $1; f=1}')"
+    behind="$behind
+  $b${n:+ (#$n)}"
+  done <<EOF
+$(git for-each-ref --format='%(refname)' refs/remotes/origin)
+EOF
+  while IFS="$TAB" read -r n head oid cross; do
+    [[ "$cross" == true ]] || continue
+    if ! git cat-file -e "$oid^{commit}" 2>/dev/null || ! ancestor origin/develop "$oid"; then
+      behind="$behind
+  #$n $head (from a fork)"
+    fi
+  done <<EOF
+$prs
+EOF
+  if [[ -n "$behind" ]]; then
+    say "open working branches that do not yet contain develop (none is merged into):$behind"
+  fi
+}
+if ancestor "$TAGC" origin/develop; then
+  say "$TAG is already an ancestor of origin/develop: the back-merge has landed"
+  finish
+  exit 0
+fi
+
+# --- 6. an existing pull request --------------------------------------------------------
+PR_NUM=""; PR_HEAD=""
+# gh pr list --head matches the branch name in forks too; a fork's is never ours
+pr_line="$(gh pr list --head "$BR" --base develop --state open --limit 100 --json number,headRefOid,isCrossRepository \
+            --jq '[.[] | select(.isCrossRepository | not)] | .[:1][] | [(.number|tostring), .headRefOid] | @tsv')" \
+  || die "gh cannot list the pull requests"
+if [[ -n "$pr_line" ]]; then
+  PR_NUM="${pr_line%%"$TAB"*}"; PR_HEAD="${pr_line#*"$TAB"}"
+fi
+step "6. the pull request"
+HEAD_SHA=""
+if [[ -n "$PR_NUM" ]]; then
+  git cat-file -e "$PR_HEAD^{commit}" 2>/dev/null || git fetch --quiet origin "+refs/heads/$BR:refs/remotes/origin/$BR" || true
+  if ancestor origin/develop "$PR_HEAD" \
+     && "$CHECK" "$(git rev-parse origin/develop)" "$PR_HEAD" origin/main "$TAG" >/dev/null 2>&1; then
+    HEAD_SHA="$PR_HEAD"
+    say "#$PR_NUM is open, current with origin/develop, and passes the check"
+  else
+    say "#$PR_NUM is open but stale or not a clean back-merge; it is rebuilt from origin/develop"
+  fi
+else
+  say "no open pull request from $BR"
+fi
+
+# --- 7 to 9. refuse a known conflict, build, verify and push ---------------------------
+refuse_version_conflict() {  # 7.
+  local promo p2 v_promo v_dev
+  promo="$(git rev-list --first-parent --merges -n1 "$TAGC" || true)"
+  [[ -n "$promo" ]] || return 0
+  p2="$(git rev-parse "$promo^2")"
+  ancestor "$p2" origin/develop || return 0
+  v_promo="$(sot_read_at "$p2" "$KIND")"; v_dev="$(sot_read_at origin/develop "$KIND")"
+  [[ "$v_promo" == "$v_dev" ]] && return 0
+  die "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop during the release, and the back-merge would conflict on the version line. Repair it (decision 6 (a) of the real-merges design): one reviewed commit restoring develop's version lines (the version file and its lockfile) to $v_promo, pushed to develop directly (with enforce_admins switched off and on again where administrators are bound); then run git back-merge again."
+}
+build() {  # 8.
+  local base files new
+  drop_worktree
+  base="$(git rev-parse origin/develop)"
+  TMP="$(mktemp -d "${TMPDIR:-/tmp}/git-back-merge.XXXXXX")"
+  WT="$TMP/$BR"
+  git worktree add --quiet --detach "$WT" "$base"
+  if ! out="$(git -C "$WT" merge --quiet --no-ff --no-edit -m "Back-merge: main → develop after $TAG" origin/main 2>&1)"; then
+    files="$(git -C "$WT" diff --name-only --diff-filter=U | tr '\n' ' ')"
+    git -C "$WT" merge --abort >/dev/null 2>&1 || true
+    drop_worktree
+    [[ -n "$files" ]] || die "the merge of origin/main into origin/develop failed: $out"
+    die "the merge of origin/main into origin/develop conflicts in: $files. Repair it (decision 6 (d) of the real-merges design): an ordinary pull request into develop that brings develop's side of each conflicting passage into agreement with main's; once it has merged, run git back-merge again. (A conflict on the version line is decision 6 (a).)"
+  fi
+  if [[ "$KIND" != version-txt ]]; then
+    new="$(cd "$WT" && sot_dev_version "$V_MAIN" patch)"
+    # uv version re-locks, and by default then syncs a virtual environment,
+    # which the temporary worktree does not need
+    files="$(cd "$WT" && UV_NO_SYNC=1 sot_write "$new")" || die "writing the placeholder $new failed; nothing is pushed"
+    # shellcheck disable=SC2086  # intentional word-split: sot_write may echo two files
+    git -C "$WT" add $files
+    git -C "$WT" commit --quiet -m "chore: open $new dev cycle"
+    PLACEHOLDER="$new"
+  fi
+  HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"
+  say "built $BR at $(git rev-parse --short "$HEAD_SHA") on origin/develop $(git rev-parse --short "$base")"
+  git -C "$WT" log --oneline --no-decorate -n "$([[ "$KIND" == version-txt ]] && echo 1 || echo 2)" | sed 's/^/    /'
+}
+verify_and_push() {  # 9.
+  if ! "$CHECK" "$(git rev-parse origin/develop)" "$HEAD_SHA" origin/main "$TAG" | sed 's/^/    /'; then
+    die "$BR fails back-merge-check; nothing is pushed"
+  fi
+  if [[ "$DRY" == 1 ]]; then return 0; fi
+  local old
+  old="$(git ls-remote --heads origin "refs/heads/$BR")" || die "cannot read $BR on origin; nothing is pushed"
+  old="${old%%"$TAB"*}"
+  [[ -z "$old" ]] || git fetch --quiet origin "+refs/heads/$BR:refs/remotes/origin/$BR" 2>/dev/null || true
+  PREV_HEAD="$old"
+  if [[ -n "$old" ]]; then
+    git push --quiet --force-with-lease="refs/heads/$BR:$old" origin "$HEAD_SHA:refs/heads/$BR"
+    say "force-pushed $BR (it replaces ${old:0:7})"
+  else
+    git push --quiet origin "$HEAD_SHA:refs/heads/$BR"
+    say "pushed $BR"
+  fi
+  git fetch --quiet origin "+refs/heads/$BR:refs/remotes/origin/$BR"
+}
+rebuild() {
+  step "7. a known conflict"; refuse_version_conflict; say "none"
+  step "8. build";           build
+  step "9. verify and push";  verify_and_push
+}
+PLACEHOLDER=""; PREV_HEAD=""
+if [[ -z "$HEAD_SHA" ]]; then rebuild; fi
+
+if [[ "$DRY" == 1 ]]; then
+  echo
+  if [[ -n "$PR_NUM" ]]; then what="refresh #$PR_NUM"; else what="open the pull request"; fi
+  say "(dry run) $BR passes the check; would push it, $what, wait for develop's required checks and merge with --merge --match-head-commit"
+  drop_worktree
+  exit 0
+fi
+
+# --- 10. open the pull request ---------------------------------------------------------------
+TITLE="chore(release): back-merge main into develop after $TAG"
+step "10. the pull request"
+if [[ -z "$PR_NUM" ]]; then
+  if ! gh label list --limit 200 --json name --jq '.[].name' | grep -xF "$LABEL" >/dev/null; then
+    gh label create "$LABEL" --color BFD4F2 \
+      --description "Release bookkeeping; left out of the generated release notes" >/dev/null
+  fi
+  cycle_line=""
+  if [[ -n "$PLACEHOLDER" ]]; then
+    cycle_line="- \`chore: open $PLACEHOLDER dev cycle\`, the open-cycle commit: the version set to the next-patch placeholder $PLACEHOLDER."
+  fi
+  # A multi-line string rather than a heredoc inside $(...), which bash 3.2
+  # misparses when the text holds an apostrophe.
+  BODY="The back-merge of $TAG: main's release, brought back into develop.
+
+- \`Back-merge: main → develop after $TAG\`, the merge of origin/main, which carries the release and, where there is one, its changelog commit.
+$cycle_line
+
+The version guard examines it in its back-merge mode (back-merge-check, from dev-tools). The branch is never updated with GitHub's \"Update branch\", which the check refuses; it is refreshed only by running \`git back-merge\` again, which rebuilds it from the newest develop. \`git back-merge\` merges it under the release ask, with \`--merge --match-head-commit\`, once develop's required checks have passed on its head."
+  url="$(gh pr create --base develop --head "$BR" --label "$LABEL" --title "$TITLE" --body "$BODY")" \
+    || die "gh could not open the pull request"
+  PR_NUM="${url##*/}"
+  say "opened #$PR_NUM: $url"
+else
+  say "#$PR_NUM carries $BR"
+fi
+old_prs="$(gh pr list --base develop --state open --limit 100 --json number,headRefName,isCrossRepository \
+            --jq '.[] | select((.isCrossRepository | not) and (.headRefName | startswith("back-merge-v"))) | [(.number|tostring), .headRefName] | @tsv' || true)"
+while IFS="$TAB" read -r n head; do
+  [[ -n "$n" && "$head" != "$BR" ]] || continue
+  gh pr close "$n" --comment "Superseded by #$PR_NUM, the back-merge after $TAG: this branch's version can no longer equal main's." >/dev/null
+  say "closed #$n ($head), superseded by #$PR_NUM"
+done <<EOF
+$old_prs
+EOF
+
+# --- 11 and 12. wait for the checks; merge -----------------------------------------------------
+# develop's protection, in one read: whether it requires up-to-date branches, then
+# its required checks, one per line (a matrix job's name holds a comma). On an HTTP
+# error gh prints the response body on stdout, so success is read from its exit
+# status; a 404 means develop is unprotected or gh lacks admin rights, and any
+# other failure is retried, since taking it for no protection would merge on
+# whatever checks happened to report.
+read_protection() {
+  local out attempt
+  for attempt in 1 2 3 4 5; do
+    if out="$(gh api "repos/$SLUG/branches/develop/protection" \
+                --jq '(.required_status_checks.strict // false | tostring), ((.required_status_checks.contexts // [])[])' \
+                2>"$SCRATCH/protection")"; then
+      STRICT="${out%%$'\n'*}"
+      if [[ "$out" == *$'\n'* ]]; then CONTEXTS="${out#*$'\n'}"; else CONTEXTS=""; fi
+      return 0
+    fi
+    if grep -F '(HTTP 404)' "$SCRATCH/protection" >/dev/null; then
+      STRICT=false; CONTEXTS=""
+      say "develop's protection cannot be read (develop is unprotected, or gh lacks admin rights): waiting for every check reported on #$PR_NUM"
+      return 0
+    fi
+    say "gh cannot read develop's protection ($(awk 'NR==1' "$SCRATCH/protection")); retrying"
+    sleep "$POLL"
+  done
+  die "gh cannot read develop's protection: $(awk 'NR==1' "$SCRATCH/protection"). #$PR_NUM is left open; run git back-merge again"
+}
+read_protection
+PR_STATE=""
+wait_for_checks() {  # 11. 0 = the required checks passed on HEAD_SHA, or the pull request
+                     # merged; 3 = the head was replaced by another push; 4 = the pull
+                     # request is no longer open (PR_STATE); exits on a failed check or
+                     # the timeout
+  local deadline out line err head_now missing bad c b
+  deadline=$(( $(date +%s) + TIMEOUT ))
+  while :; do
+    missing=""; bad=""
+    if ! line="$(gh pr view "$PR_NUM" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
+      missing=" (gh cannot read #$PR_NUM; retrying)"
+    elif PR_STATE="${line%%"$TAB"*}"; head_now="${line#*"$TAB"}"; [[ "$PR_STATE" != OPEN ]]; then
+      return 4
+    elif [[ "$head_now" != "$HEAD_SHA" && "$head_now" != "$PREV_HEAD" ]]; then
+      return 3
+    elif [[ "$head_now" != "$HEAD_SHA" ]]; then
+      missing=" #$PR_NUM's head is not yet $(git rev-parse --short "$HEAD_SHA")"
+    else
+      out="$(gh pr checks "$PR_NUM" --json name,bucket --jq '.[] | [.name, .bucket] | @tsv' 2>"$SCRATCH/checks" || true)"
+      err="$(awk 'NR==1' "$SCRATCH/checks")"
+      # gh reports no checks as an error; any other error is shown while waiting
+      if [[ -n "$err" && "$err" != *"no checks reported"* ]]; then missing=" (gh pr checks: $err)"; fi
+      if [[ -n "$CONTEXTS" ]]; then
+        while IFS= read -r c; do
+          [[ -n "$c" ]] || continue
+          b="$(printf '%s\n' "$out" | awk -F"$TAB" -v n="$c" '!f && $1==n{print $2; f=1}')"
+          case "$b" in
+            pass|skipping) ;;
+            fail|cancel) bad="$bad '$c'" ;;
+            *) missing="$missing '$c'" ;;
+          esac
+        done <<EOF
+$CONTEXTS
+EOF
+      else
+        [[ -n "$out" ]] || missing=" (no checks reported yet)"
+        while IFS="$TAB" read -r c b; do
+          [[ -n "$c" ]] || continue
+          case "$b" in pass|skipping) ;; fail|cancel) bad="$bad $c" ;; *) missing="$missing $c" ;; esac
+        done <<EOF
+$out
+EOF
+      fi
+    fi
+    if [[ -n "$bad" ]]; then
+      if landed; then return 0; fi   # merged by another hand all the same
+      die "#$PR_NUM: required checks failed:$bad. The pull request is left open; see its checks, then run git back-merge again"
+    fi
+    [[ -n "$missing" ]] || return 0
+    (( $(date +%s) < deadline )) || die "timed out waiting for #$PR_NUM's checks:$missing"
+    say "waiting for #$PR_NUM:$missing"
+    sleep "$POLL"
+  done
+}
+REBUILDS=0
+rebuild_again() {  # $1 = why; back to 6, at most MAX_REBUILDS times
+  REBUILDS=$((REBUILDS + 1))
+  (( REBUILDS <= MAX_REBUILDS )) || die "rebuilt $MAX_REBUILDS times while #$PR_NUM's checks ran; #$PR_NUM is left open; run git back-merge again when develop is quiet"
+  say "$1; rebuilding ($REBUILDS of $MAX_REBUILDS)"
+  rebuild
+}
+landed() {  # the tag has reached origin/develop: this pull request merged, by any hand
+  git fetch --quiet origin develop
+  ancestor "$TAGC" origin/develop
+}
+while :; do
+  step "11. develop's required checks on #$PR_NUM"
+  rc=0; wait_for_checks || rc=$?
+  if landed; then say "$TAG has reached origin/develop while the checks ran; #$PR_NUM is not merged again"; break; fi
+  if [[ "$rc" == 4 ]]; then
+    die "#$PR_NUM reads '$PR_STATE', and $TAG is not on origin/develop: the pull request is no longer open and the back-merge has not landed, so nothing is rebuilt. Run git back-merge again, which opens a new pull request"
+  fi
+  if [[ "$rc" == 3 ]]; then
+    rebuild_again "#$PR_NUM's head was changed outside git back-merge, which alone refreshes $BR"; continue
+  fi
+  say "passed on $(git rev-parse --short "$HEAD_SHA")"
+  if [[ "$STRICT" == true ]] && ! ancestor origin/develop "$HEAD_SHA"; then
+    rebuild_again "develop has moved beyond #$PR_NUM's head"; continue
+  fi
+  step "12. merge #$PR_NUM"
+  if gh pr merge "$PR_NUM" --merge --match-head-commit "$HEAD_SHA"; then break; fi
+  if landed; then say "gh reported a failure, but $TAG has reached origin/develop"; break; fi
+  if [[ "$STRICT" == true ]] && ! ancestor origin/develop "$HEAD_SHA"; then
+    rebuild_again "develop has moved beyond #$PR_NUM's head"; continue
+  fi
+  line="$(gh pr view "$PR_NUM" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv' || true)"
+  if [[ "${line%%"$TAB"*}" == OPEN && "${line#*"$TAB"}" != "$HEAD_SHA" ]]; then
+    rebuild_again "#$PR_NUM's head was changed outside git back-merge before the merge"; continue
+  fi
+  die "GitHub refused to merge #$PR_NUM; it is left open"
+done
+# exit 0 means the tag is on origin/develop, whatever the state read says
+landed || die "#$PR_NUM's merge was reported, but $TAG is not on origin/develop"
+state=""
+for attempt in 1 2 3; do
+  state="$(gh pr view "$PR_NUM" --json state --jq .state 2>/dev/null)" && break
+  sleep "$POLL"
+done
+if [[ "$state" == MERGED ]]; then
+  say "merged #$PR_NUM"
+  if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+    git push --quiet origin --delete "$BR" && say "deleted $BR on origin"
+  fi
+elif [[ -z "$state" ]]; then
+  say "$TAG has reached origin/develop; #$PR_NUM's state could not be read, so $BR is left on origin"
+else
+  say "#$PR_NUM reads '$state', but $TAG has reached origin/develop by another route; #$PR_NUM and $BR are left for a person to close"
+fi
+
+finish
