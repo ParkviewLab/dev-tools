@@ -23,8 +23,10 @@
 # older tag, waits for develop's required checks, and merges it with --merge
 # --match-head-commit, never --admin. Each step first tests whether it
 # has already been done, so a second run after an interruption resumes. A branch
-# that develop has moved beyond is rebuilt from the new develop, never updated with
-# GitHub's "Update branch". A repository that does not yet allow merge commits
+# that develop has moved beyond is rebuilt from the new develop when a run finds it
+# and, in a repository that requires up-to-date branches, when develop moves while
+# the checks run; it is never updated with GitHub's "Update branch". A repository
+# that does not yet allow merge commits
 # still ends its release with the direct back-merge; there the command refuses and
 # quotes the released handbook. See the handbook's releases.md and branching.md.
 #
@@ -246,13 +248,20 @@ finish() {  # 13. clean up and sync
   step "13. clean up and sync"
   drop_worktree
   git fetch --quiet --prune origin
-  local devwt
-  devwt="$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0=="branch refs/heads/develop"{print w}')"
+  # The develop worktree: the first entry on develop that has a work tree. Listed
+  # from a linked worktree, the handbook's bare clone (core.bare unset, HEAD
+  # develop) is an entry on develop too, with none.
+  local devwt="" w st
+  while IFS= read -r w; do
+    if [[ "$(git -C "$w" rev-parse --is-inside-work-tree 2>/dev/null)" == true ]]; then devwt="$w"; break; fi
+  done < <(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0=="branch refs/heads/develop"{print w}')
   if [[ -n "$devwt" ]]; then
-    if [[ -z "$(git -C "$devwt" status --porcelain)" ]]; then
-      git -C "$devwt" pull --quiet --ff-only && say "fast-forwarded $devwt" || say "could not fast-forward $devwt; pull it by hand"
-    else
+    if ! st="$(git -C "$devwt" status --porcelain 2>/dev/null)"; then
+      say "cannot read the state of $devwt; not pulled"
+    elif [[ -n "$st" ]]; then
       say "$devwt has local changes; not pulled"
+    else
+      git -C "$devwt" pull --quiet --ff-only && say "fast-forwarded $devwt" || say "could not fast-forward $devwt; pull it by hand"
     fi
   fi
   if ancestor "$TAGC" origin/develop; then
