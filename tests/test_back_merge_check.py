@@ -1027,6 +1027,73 @@ class PromotionSearch(CheckCase):
         self.assertOutcome(PASS, self.check(base, "HEAD", tag="v0.1.2"), "(a release picked onto main)")
 
 
+class FlowVersionChange(CheckCase):
+    """The merge of a release picked onto main takes from main only the version change
+    the release flow makes: at the merge base a release R, and develop at R's
+    next-patch placeholder, which R's back-merge opened. Any other version on either
+    side is refused, named; where the automatic merge is clean it is taken as before."""
+
+    def head_as_picked(self, base, version, placeholder, message):
+        """M, git's merge of main into base with the version files taken from develop and
+        the project's version set to main's, then C; returns C."""
+        r, g = self.repo, self.repo.g
+        g("switch", "-q", "-c", "crafted", base)
+        self.sb.run(["git", "merge", "-q", "--no-ff", "origin/main", "-m", message], r.releaser, check=False)
+        files = [f for f in ("pyproject.toml", "uv.lock", "package.json", "package-lock.json") if (r.releaser / f).exists()]
+        g("checkout", "-q", "--ours", "--", *files)
+        r.set_version(r.releaser, version)
+        g("add", "-A")
+        g("commit", "-q", "-m", message)
+        r.set_version(r.releaser, placeholder)
+        g("commit", "-q", "-am", f"chore: open {placeholder} dev cycle")
+        return g("rev-parse", "HEAD")
+
+    def push_version(self, version):
+        r = self.repo
+        r.g("fetch", "-q", "origin")
+        r.g("switch", "-q", "develop")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, version)
+        r.g("commit", "-q", "-am", f"chore: dev build {version}")
+        r.g("push", "-q", "origin", "develop")
+
+    def test_a_first_release_reached_by_a_fast_forward_whose_version_changed(self):
+        # develop re-pointed during the first release: the merge base, develop's tip at
+        # the fast-forward, holds a placeholder, not a release, so the change is not the
+        # flow's own; no rule of its own for a release without an earlier tag is needed
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject", first_release_by_fast_forward=True)
+        self.push_version("0.2.0.dev0")
+        base = r.g("rev-parse", "origin/develop")
+        head = self.head_as_picked(base, "0.1.1", "0.1.2.dev0", "Back-merge: main → develop after v0.1.1")
+        result = self.check(base, head, tag="v0.1.1")
+        self.assertOutcome(FAIL, result, "the merge base's version must be a release X.Y.Z, and it is 0.1.1.dev0")
+        result = self.merge_tree(base, "v0.1.1")
+        self.assertEqual(result.returncode, FAIL, result.stdout + result.stderr)
+        self.assertIn("it is 0.1.1.dev0", result.stdout.splitlines()[-1])
+
+    def test_develop_away_from_the_placeholder_its_back_merge_opened(self):
+        # v0.1.1's back-merge opened 0.1.2.dev0; a dev build then committed 0.1.2.dev1,
+        # which the release flow does not make; then v0.1.2 was picked onto main
+        for kind, dev_build, placeholder, found, v3, next3 in (
+                ("pyproject", "0.1.2.dev1", "0.1.2.dev0", "0.1.1", "0.1.2", "0.1.3.dev0"),
+                ("package", "3.5.2-dev1", "3.5.2-dev0", "3.5.1", "3.5.2", "3.5.3-dev0")):
+            with self.subTest(kind=kind):
+                self.sb = Sandbox()
+                self.addCleanup(self.sb.cleanup)
+                self.repo = r = ReleasedRepo(self.sb, kind)
+                r.land_back_merge()
+                self.push_version(dev_build)
+                r.hotfix()
+                r.g("fetch", "-q", "origin")
+                base = r.g("rev-parse", "origin/develop")
+                head = self.head_as_picked(base, v3, next3, f"Back-merge: main → develop after v{v3}")
+                self.assertOutcome(FAIL, self.check(base, head, tag="v" + v3),
+                                   f"develop's version must be {placeholder}, the next-patch placeholder of the merge"
+                                   f" base's {found}, and it is {dev_build}")
+
+
 class FastForwardFirstRelease(CheckCase):
     """A first release that main reached by a fast-forward has no promotion commit, so
     it counts as picked onto main; the automatic merge, tried first, passes it as before."""

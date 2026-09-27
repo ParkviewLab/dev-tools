@@ -414,7 +414,7 @@ picked_merge() {  # 8, for a release picked onto main: prints the merge commit M
         # undo develop's newer work on those lines. The owner ruled the exception.
         die "the merge of origin/main into origin/develop conflicts in: ${reason##*" conflicts in: "}. $TAG is a release picked onto main, a hotfix, whose conflict decision 6 (d)'s repair would settle by undoing develop's newer work on those lines. Its back-merge is the exception ruled on 2026-09-27: the direct back-merge, with administrators unbound for its one push, the conflict resolved by hand. Nothing is pushed." ;;
       *)
-        die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG, a release picked onto main: $reason. Nothing is pushed. It needs a person: the exception for a back-merge that git back-merge refuses is the direct back-merge, with administrators unbound for its one push (ruled on 2026-09-27)." ;;
+        die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason. Nothing is pushed. It needs a person: the exception for a back-merge that git back-merge refuses is the direct back-merge, with administrators unbound for its one push (ruled on 2026-09-27)." ;;
     esac
   fi
   tree="${out##*$'\n'}"

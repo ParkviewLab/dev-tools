@@ -856,6 +856,38 @@ class PickedReleases(BackMergeCase):
         self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
         self.assertNoResidue()
 
+    def test_a_first_release_reached_by_a_fast_forward_whose_version_changed(self):
+        # develop re-pointed during a first release that main reached by a fast-forward:
+        # the change is not the release flow's own, so no merge is taken from main
+        r = self.make("pyproject", first_release_by_fast_forward=True)
+        r.g("fetch", "-q", "origin")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, "0.2.0.dev0")
+        r.g("commit", "-q", "-am", "chore: develop re-pointed to 0.2.0.dev0")
+        r.g("push", "-q", "origin", "develop")
+        result = self.back_merge()
+        self.assertRefused(result, "the merge base's version must be a release X.Y.Z, and it is 0.1.1.dev0")
+        self.assertIn("the direct back-merge, with administrators unbound", result.stderr)
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.2.0.dev0")
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+    def test_develop_away_from_the_placeholder_its_back_merge_opened(self):
+        r = self.make("pyproject")
+        r.land_back_merge()
+        r.g("fetch", "-q", "origin")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, "0.1.2.dev1")
+        r.g("commit", "-q", "-am", "chore: dev build v0.1.2.dev1")
+        r.g("push", "-q", "origin", "develop")
+        r.hotfix()
+        self.sb.set_gh_state(r.gh_state())
+        result = self.back_merge()
+        self.assertRefused(result, "develop's version must be 0.1.2.dev0, the next-patch placeholder of the merge"
+                                   " base's 0.1.1, and it is 0.1.2.dev1")
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
     def test_a_first_release_reached_by_a_fast_forward(self):
         # no promotion commit, so it counts as picked; the automatic merge is clean,
         # and the back-merge is what it was

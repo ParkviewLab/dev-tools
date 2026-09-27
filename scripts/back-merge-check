@@ -54,7 +54,10 @@
 #      merge base are first set to main's version V, and that merge must be
 #      clean. M^1 and M^2 must then have exactly one merge base MB, which is
 #      tested before the release's promotion is sought, and a history with more
-#      is refused with that reason; MB' and D'
+#      is refused with that reason. Only the version change the release flow
+#      makes is taken from main: MB's version must be a release R and M^1's
+#      R's next-patch placeholder, which R's back-merge opened (below, condition
+#      4), and any other version is refused, named. MB' and D'
 #      are MB and M^1 with those lines rewritten to V and nothing else changed,
 #      built as commits in the object store through a temporary index, touching
 #      no ref, index or working tree; and the merge is `git merge-tree
@@ -397,7 +400,7 @@ plain_merge() {  # $1, $2 = the two sides; sets AUTO (the tree), AUTO_RC (0 clea
 # develop's version has since moved past, and no version comparison or rewrite
 # against one merge base applies.
 picked_tree() {  # $1 = develop's side, $2 = main's side, $3 = develop's tip (the base)
-  local tagc promo bases rc n mbp dp out
+  local tagc promo bases rc n vmb want vdev mbp dp out
   NORM=""; NORM_WHY=""
   [ -n "$TAG" ] || return 1
   case "$KIND" in
@@ -420,6 +423,27 @@ picked_tree() {  # $1 = develop's side, $2 = main's side, $3 = develop's tip (th
   [ -n "$V_MAIN" ] || no_version main "$MAIN" main
   [ "v$V_MAIN" = "$TAG" ] || fail "main's version $V_MAIN is not the tag's ($TAG)"
   V_PICK=$V_MAIN
+  # Only the version change the release flow makes is taken from main: at the
+  # merge base a release R, and on develop R's next-patch placeholder, which R's
+  # back-merge opened. Any other version on either side is refused, named.
+  read_version "$bases" base; vmb=$VERSION
+  if [ -z "$vmb" ]; then
+    NORM_WHY="for a release picked onto main, the merge base's version cannot be read: $(tr '\n' ' ' < "$TMPD/why-base" | sed 's/ *$//')"
+    return 0
+  fi
+  if ! want=$(placeholder_for "$vmb" "$KIND"); then
+    NORM_WHY="for a release picked onto main, the merge base's version must be a release X.Y.Z, and it is $vmb"
+    return 0
+  fi
+  read_version "$1" develop; vdev=$VERSION
+  if [ -z "$vdev" ]; then
+    NORM_WHY="for a release picked onto main, develop's version cannot be read: $(tr '\n' ' ' < "$TMPD/why-develop" | sed 's/ *$//')"
+    return 0
+  fi
+  if [ "$vdev" != "$want" ]; then
+    NORM_WHY="for a release picked onto main, develop's version must be $want, the next-patch placeholder of the merge base's $vmb, and it is $vdev"
+    return 0
+  fi
   if [ "$KIND" = pyproject ] && [ -z "$PROJ_MAIN" ]; then
     NORM_WHY="for a release picked onto main, the project's name, which owns its block in uv.lock, cannot be read from main: $(tr '\n' ' ' < "$TMPD/why-name-main" | sed 's/ *$//')"
     return 0
