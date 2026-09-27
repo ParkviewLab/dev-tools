@@ -7,7 +7,9 @@ repository that does not allow merge commits and whose dev-release.yml declares
 no `kind` input, it commits, pushes and dispatches as before, --open included;
 where the workflow declares the input, it dispatches with it and commits nothing.
 Once merge commits are allowed, develop takes no direct push, so --open and a dev
-build without the input are refused. A VERSION.txt repository has no dev build.
+build without the input are refused, except that --open --direct opens the cycle by
+a direct push after the exception's direct back-merge, carrying its merge commit in
+the same push. A VERSION.txt repository has no dev build.
 """
 
 from __future__ import annotations
@@ -33,6 +35,17 @@ WF_KIND_IN_A_JOB = WF_NO_INPUT.replace("    runs-on: ubuntu-latest\n",
                                        "    runs-on: ubuntu-latest\n    env:\n      kind: patch\n")
 WF_KIND_NESTED = WF_NO_INPUT.replace("  workflow_dispatch:\n",
                                      "  workflow_dispatch:\n    inputs:\n      target:\n        kind: patch\n")
+# GitHub's answer to a direct push to develop where its protection binds administrators
+GH006_HOOK = """#!/bin/sh
+while read old new ref; do
+  if [ "$ref" = refs/heads/develop ]; then
+    echo "error: GH006: Protected branch update failed for refs/heads/develop." >&2
+    echo "error: Changes must be made through a pull request." >&2
+    exit 1
+  fi
+done
+exit 0
+"""
 
 
 class DevReleaseCase(unittest.TestCase):
@@ -83,7 +96,17 @@ class BeforeTheSwitch(DevReleaseCase):
         r = self.make()
         res = self.dev_release("--open")
         self.assertEqual(res.returncode, 0, self.out(res))
-        self.assertRegex(self.sb.git(r.origin, "log", "-1", "--format=%s", "develop"), r"^chore: open .* dev cycle$")
+        self.assertEqual(self.sb.git(r.origin, "log", "-1", "--format=%s", "develop"), "chore: open 0.1.1.dev1 dev cycle")
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.1.dev1")
+        self.assertEqual(self.dispatches(), [])
+
+    def test_open_with_direct_is_open_before_the_switch(self):
+        # in a repository that has not switched, --direct changes nothing
+        r = self.make()
+        res = self.dev_release("--open", "--direct")
+        self.assertEqual(res.returncode, 0, self.out(res))
+        self.assertEqual(self.sb.git(r.origin, "log", "-1", "--format=%s", "develop"), "chore: open 0.1.1.dev1 dev cycle")
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.1.dev1")
         self.assertEqual(self.dispatches(), [])
 
     def test_a_local_tag_that_differs_from_origins_does_not_stop_it(self):
@@ -161,6 +184,14 @@ class AfterTheSwitch(DevReleaseCase):
         self.make(allow_merge_commit=True)
         self.assertRefused(self.dev_release("--open"), "git back-merge")
 
+    def test_open_without_direct_is_refused_and_names_direct_for_the_exception(self):
+        self.make(allow_merge_commit=True)
+        self.assertRefused(self.dev_release("--open"), "git dev-release --open --direct")
+
+    def test_direct_is_allowed_only_with_open(self):
+        self.make(allow_merge_commit=True)
+        self.assertRefused(self.dev_release("--direct", "patch"), "--direct is allowed only with --open")
+
     def test_open_is_refused_even_where_the_workflow_takes_the_input(self):
         self.make(workflow=WF_KIND, allow_merge_commit=True)
         self.assertRefused(self.dev_release("--open"), "back-merge pull request")
@@ -190,11 +221,58 @@ class AfterTheSwitch(DevReleaseCase):
         self.assertRefused(self.dev_release("patch"), "declares no kind input")
 
 
+class TheException(DevReleaseCase):
+    """--open --direct after the exception ruled on 2026-09-27, the direct back-merge with
+    administrators unbound for its one push: in a repository that allows merge commits
+    it opens the cycle by a direct push, as --open does before the switch, and that one
+    push carries the hand-made merge commit as well."""
+
+    def hand_made_back_merge(self):
+        """A hotfix released; in the develop worktree, the exception's merge of main, its
+        conflicting version lines resolved by hand to main's, committed and not pushed."""
+        r = self.make(allow_merge_commit=True)
+        r.land_back_merge()
+        r.hotfix()
+        self.sb.set_gh_state(r.gh_state(allow_merge_commit=True))
+        dev = r.dev
+        self.sb.git(dev, "pull", "-q", "--ff-only")
+        self.sb.run(["git", "merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop after v0.1.2"],
+                    dev, check=False)
+        self.sb.git(dev, "checkout", "-q", "--theirs", "--", "pyproject.toml", "uv.lock")
+        self.sb.git(dev, "add", "pyproject.toml", "uv.lock")
+        self.sb.git(dev, "commit", "-q", "--no-edit")
+        self.develop_before = self.sb.git(r.origin, "rev-parse", "develop")
+        return r, self.sb.git(dev, "rev-parse", "HEAD")
+
+    def test_one_push_carries_the_merge_and_the_open_cycle(self):
+        r, merge = self.hand_made_back_merge()
+        res = self.dev_release("--open", "--direct")
+        self.assertEqual(res.returncode, 0, self.out(res))
+        tip = self.sb.git(r.origin, "rev-parse", "develop")
+        self.assertEqual(self.sb.git(r.origin, "log", "-1", "--format=%s", tip), "chore: open 0.1.3.dev0 dev cycle")
+        self.assertEqual(self.sb.git(r.origin, "rev-parse", tip + "^"), merge)
+        self.assertEqual(self.sb.git(r.origin, "log", "-1", "--format=%s", merge), "Back-merge: main → develop after v0.1.2")
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.3.dev0")
+        self.assertEqual(self.sb.run(["git", "merge-base", "--is-ancestor", r.tag3_commit, tip], r.origin,
+                                     check=False).returncode, 0)
+        self.assertEqual(self.dispatches(), [])
+
+    def test_the_push_refused_where_administrators_are_bound(self):
+        r, merge = self.hand_made_back_merge()
+        hook = r.origin / "hooks" / "pre-receive"
+        hook.write_text(GH006_HOOK)
+        hook.chmod(0o755)
+        res = self.dev_release("--open", "--direct")
+        self.assertEqual(res.returncode, 1, self.out(res))
+        self.assertIn("switch enforce_admins off for the one push", res.stderr)
+        self.assertDevelopUnchanged()
+
+
 class VersionTxt(DevReleaseCase):
 
     def test_refused(self):
         self.make("version-txt", workflow=None)
-        for args in (("patch",), ("--open",)):
+        for args in (("patch",), ("--open",), ("--open", "--direct")):
             res = self.dev_release(*args)
             self.assertEqual(res.returncode, 1, self.out(res))
             self.assertIn("VERSION.txt", res.stderr)

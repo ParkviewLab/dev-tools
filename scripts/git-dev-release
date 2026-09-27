@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Gary Frattarola <garyf@parkviewlab.ai>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# git dev-release [--open] [--dry-run] [<major|minor|patch>]
+# git dev-release [--open [--direct]] [--dry-run] [<major|minor|patch>]
 #
 # On-demand DEVELOPMENT build: a candidate for local testing, the dev counterpart
 # of each of the repository's publish targets that has one (the handbook's
@@ -23,14 +23,24 @@
 #   git dev-release --open     # before the switch only: open the next cycle,
 #                              #   X.Y.(Z+1).dev0, or X.Y.(Z+1)-dev0 for
 #                              #   package.json; no publish
+#   git dev-release --open --direct   # after the exception's direct back-merge
 #   git dev-release --dry-run patch
 #
 # Once a repository allows merge commits, develop takes no direct push: the open
 # cycle arrives as the second commit of the back-merge pull request (`git
 # back-merge`), so --open refuses there, and so does a dev build whose workflow
-# lacks the `kind` input. A repository whose version is in VERSION.txt has no dev
-# build and skips the open cycle. See the handbook's releases.md ("Development
-# versioning") and ci.md (dev-release.yml).
+# lacks the `kind` input. The one exception is the direct back-merge ruled on
+# 2026-09-27, made where git back-merge refuses, with administrators unbound for
+# its one push: after its merge, made and resolved by hand in the develop
+# worktree, `--open --direct` does what --open does before the switch, writing
+# the next-patch placeholder after the release develop then carries (X.Y.(Z+1)
+# becomes X.Y.(Z+2).dev0, or -dev0 for package.json) and committing it, and its
+# one push of develop carries the merge commit too. Where GitHub refuses that
+# push because administrators are bound, it says to switch enforce_admins off for
+# the one push. --direct is allowed only with --open, and changes nothing in a
+# repository that has not switched. A repository whose version is in VERSION.txt
+# has no dev build and skips the open cycle. See the handbook's releases.md
+# ("Development versioning") and ci.md (dev-release.yml).
 
 set -euo pipefail
 
@@ -42,16 +52,21 @@ while [[ -L "$_src" ]]; do
 done
 source "$(cd -P "$(dirname "$_src")" && pwd)/_sot.sh"
 
-DRY=0; OPEN=0; KIND=""
+DRY=0; OPEN=0; DIRECT=0; KIND=""
+usage() { echo "usage: git dev-release [--open [--direct]] [--dry-run] [<major|minor|patch>]"; }
 for a in "$@"; do
   case "$a" in
     --dry-run)         DRY=1 ;;
     --open)            OPEN=1 ;;
+    --direct)          DIRECT=1 ;;
     major|minor|patch) KIND="$a" ;;
-    *) echo "git dev-release: unknown arg '$a'" >&2
-       echo "usage: git dev-release [--open] [--dry-run] [<major|minor|patch>]" >&2; exit 1 ;;
+    *) echo "git dev-release: unknown arg '$a'" >&2; usage >&2; exit 1 ;;
   esac
 done
+if [[ "$DIRECT" == 1 && "$OPEN" == 0 ]]; then
+  echo "git dev-release: --direct is allowed only with --open: it opens the next cycle by a direct push, after the direct back-merge of the exception ruled on 2026-09-27" >&2
+  usage >&2; exit 1
+fi
 
 sot_kind >/dev/null
 
@@ -130,9 +145,14 @@ case "$allowed" in
   true|false) ;;
   *) echo "git dev-release: gh read no allow_merge_commit setting for $slug ('$allowed'); GitHub returns it only to a caller with admin rights on the repository" >&2; exit 1 ;;
 esac
-if [[ "$allowed" == true ]]; then
+SWITCHED_DIRECT=0
+if [[ "$allowed" == true && "$OPEN" == 1 && "$DIRECT" == 1 ]]; then
+  # the exception: after its direct back-merge, the cycle opens by a direct push
+  SWITCHED_DIRECT=1
+  echo "$slug allows merge commits; --direct opens the cycle by a direct push, after the direct back-merge of the exception ruled on 2026-09-27"
+elif [[ "$allowed" == true ]]; then
   if [[ "$OPEN" == 1 ]]; then
-    echo "git dev-release: $slug allows merge commits, so develop takes no direct push: the open cycle arrives as the second commit of the back-merge pull request. After a release, run git back-merge." >&2
+    echo "git dev-release: $slug allows merge commits, so develop takes no direct push: the open cycle arrives as the second commit of the back-merge pull request. After a release, run git back-merge. Where its back-merge is the exception ruled on 2026-09-27, the direct back-merge with administrators unbound for its one push, open the cycle after its merge with git dev-release --open --direct." >&2
   else
     echo "git dev-release: $slug allows merge commits, so develop takes no direct push, and its dev-release.yml on origin/develop declares no kind input: re-assemble it from the dev-release parts of a handbook release whose gate takes the kind input, and run git dev-release again." >&2
   fi
@@ -174,7 +194,22 @@ fi
 # shellcheck disable=SC2046  # intentional word-split: sot_write may echo two files
 git add $(sot_write "$new")
 git commit -m "$msg" >/dev/null
-git push origin develop
+if [[ "$SWITCHED_DIRECT" == 1 ]]; then
+  # one push carries the open-cycle commit and the exception's merge before it
+  if ! out="$(git push origin develop 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    case "$out" in
+      *"Protected branch update failed"*)
+        echo "git dev-release: GitHub refused the push: develop's protection binds administrators. As the exception prescribes, switch enforce_admins off for the one push, push develop (git push origin develop), which carries the commits made here, and switch enforce_admins on again." >&2 ;;
+      *)
+        echo "git dev-release: the push of develop failed; the commits made here stay on the local develop" >&2 ;;
+    esac
+    exit 1
+  fi
+  printf '%s\n' "$out"
+else
+  git push origin develop
+fi
 
 if [[ "$OPEN" == 1 ]]; then
   echo "opened dev cycle at $new (pushed develop). No publish."
