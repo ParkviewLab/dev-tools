@@ -246,13 +246,20 @@ finish() {  # 13. clean up and sync
   step "13. clean up and sync"
   drop_worktree
   git fetch --quiet --prune origin
-  local devwt
-  devwt="$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0=="branch refs/heads/develop"{print w}')"
+  # The develop worktree: the first entry on develop that has a work tree. Listed
+  # from a linked worktree, the handbook's bare clone (core.bare unset, HEAD
+  # develop) is an entry on develop too, with none.
+  local devwt="" w st
+  while IFS= read -r w; do
+    if [[ "$(git -C "$w" rev-parse --is-inside-work-tree 2>/dev/null)" == true ]]; then devwt="$w"; break; fi
+  done < <(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0=="branch refs/heads/develop"{print w}')
   if [[ -n "$devwt" ]]; then
-    if [[ -z "$(git -C "$devwt" status --porcelain)" ]]; then
-      git -C "$devwt" pull --quiet --ff-only && say "fast-forwarded $devwt" || say "could not fast-forward $devwt; pull it by hand"
-    else
+    if ! st="$(git -C "$devwt" status --porcelain 2>/dev/null)"; then
+      say "cannot read the state of $devwt; not pulled"
+    elif [[ -n "$st" ]]; then
       say "$devwt has local changes; not pulled"
+    else
+      git -C "$devwt" pull --quiet --ff-only && say "fast-forwarded $devwt" || say "could not fast-forward $devwt; pull it by hand"
     fi
   fi
   if ancestor "$TAGC" origin/develop; then
