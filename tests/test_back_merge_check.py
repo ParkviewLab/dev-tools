@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import unittest
 
 from backmerge_support import (FIX_LINE_2, SCRIPTS, ReleasedRepo, Sandbox, rework_line_2, set_package_version,
@@ -935,6 +936,95 @@ class PromotionRelease(CheckCase):
         base = r.g("rev-parse", "origin/develop")
         auto = r.g("merge-tree", "--write-tree", base, "origin/main")
         self.assertTree(self.merge_tree(base, "v0.1.1"), auto)
+
+
+class PromotionSearch(CheckCase):
+    """A release's promotion is sought on the tag's first-parent line as far as develop's
+    tip, the base, holds it: that is the part of main a back-merge brings. An earlier
+    release's promotion that has not been back-merged is then seen through a later
+    hotfix, and a head whose merge has a stale first parent does not hide it."""
+
+    def resolve_as_picked(self, start, version, placeholder, message):
+        """git's merge of main into start, its version files taken from develop with the
+        project's version set to main's, as the merge of a release picked onto main sets
+        them; then the open cycle. Returns the head."""
+        r, g = self.repo, self.repo.g
+        g("switch", "-q", "-c", "crafted", start)
+        self.sb.run(["git", "merge", "-q", "--no-ff", "origin/main", "-m", message], r.releaser, check=False)
+        g("checkout", "-q", "--ours", "--", "pyproject.toml", "uv.lock")
+        r.set_version(r.releaser, version)
+        g("add", "-A")
+        g("commit", "-q", "-m", message)
+        r.set_version(r.releaser, placeholder)
+        g("commit", "-q", "-am", f"chore: open {placeholder} dev cycle")
+        return g("rev-parse", "HEAD")
+
+    def test_a_promotion_not_yet_back_merged_is_seen_through_a_hotfix(self):
+        # v0.1.1 is promoted and develop's version changes during it, which decision 6
+        # (a) refuses; before its back-merge lands, v0.1.2 is picked onto main. The
+        # back-merge of v0.1.2 brings v0.1.1's promotion too
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject")
+        g = r.g
+        g("fetch", "-q", "origin")
+        g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, "0.1.1.dev1")
+        g("commit", "-q", "-am", "chore: dev build v0.1.1.dev1")
+        g("push", "-q", "origin", "develop")
+        r.hotfix()
+        g("fetch", "-q", "origin")
+        base = g("rev-parse", "origin/develop")
+        head = self.resolve_as_picked(base, "0.1.2", "0.1.3.dev0", "Back-merge: main → develop after v0.1.2")
+        self.assertOutcome(FAIL, self.check(base, head, tag="v0.1.2"), "the automatic merge of the parents conflicts")
+        result = self.merge_tree(base, "v0.1.2")
+        self.assertEqual(result.returncode, FAIL, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.splitlines()[-1].endswith(" conflicts in: pyproject.toml uv.lock"), result.stdout)
+
+    def test_a_stale_first_parent_does_not_hide_the_promotion(self):
+        # v0.1.1 is promoted from P; a branch cut before P changes develop's version and
+        # is merged after the promotion. The head's merge takes that branch's tip, which
+        # does not hold P, for its first parent; develop's tip, the base, holds P
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject")
+        g = r.g
+        g("fetch", "-q", "origin")
+        g("switch", "-q", "-c", "vc", r.promoted + "^")
+        r.set_version(r.releaser, "0.1.1.dev1")
+        g("commit", "-q", "-am", "chore: dev build v0.1.1.dev1")
+        stale = g("rev-parse", "HEAD")
+        g("switch", "-q", "develop")
+        g("merge", "-q", "--ff-only", "origin/develop")
+        g("merge", "-q", "--no-ff", "vc", "-m", "Merge vc (#5)")
+        g("push", "-q", "origin", "develop")
+        g("fetch", "-q", "origin")
+        base = g("rev-parse", "origin/develop")
+        head = self.resolve_as_picked(stale, "0.1.1", "0.1.2.dev0", "Back-merge: main → develop after v0.1.1")
+        self.assertOutcome(FAIL, self.check(base, head, tag="v0.1.1"), "the automatic merge of the parents conflicts")
+
+    def test_a_repository_with_many_release_tags(self):
+        # the rule reads no list of release tags; the one it read before went to awk as
+        # a single argument, which Linux caps at 128 KiB, some 3,200 tags
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, "pyproject")
+        r.land_back_merge()
+        r.hotfix()
+        root = r.g("rev-list", "--max-parents=0", "HEAD")
+        refs = "".join(f"create refs/tags/v9.{i // 1000}.{i % 1000} {root}\n" for i in range(3500))
+        subprocess.run(["git", "update-ref", "--stdin"], cwd=r.releaser, env=self.sb.env, input=refs, text=True,
+                       check=True)
+        r.g("fetch", "-q", "origin")
+        base = r.g("rev-parse", "origin/develop")
+        r.g("switch", "-q", "-c", "back-merge", base)
+        self.sb.run(["git", "merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop after v0.1.2"],
+                    r.releaser, check=False)
+        r.g("checkout", "-q", "--ours", "--", "pyproject.toml", "uv.lock")
+        r.set_version(r.releaser, "0.1.2")
+        r.g("add", "-A")
+        r.g("commit", "-q", "-m", "Back-merge: main → develop after v0.1.2")
+        self.assertOutcome(PASS, self.check(base, "HEAD", tag="v0.1.2"), "(a release picked onto main)")
 
 
 class FastForwardFirstRelease(CheckCase):

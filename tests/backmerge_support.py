@@ -664,6 +664,8 @@ class ReleasedRepo:
     first_release_by_fast_forward
     leaves v1 untagged and brings main to develop by a fast-forward rather than a
     promotion merge, so that v2 is a first release with no promotion commit.
+    early_merge merges into develop, by a real merge, after its dev cycle opened, a
+    pull request's branch cut from the initial commit, before the cycle opened.
     land_back_merge() then lands v2's back-merge on develop, and hotfix() releases
     a fix picked onto main after it.
     `releaser` is a clone used to make the history; `dev` is a clone with develop
@@ -679,7 +681,8 @@ class ReleasedRepo:
                  changelog: bool | None = None, lockfile: bool = True, lock_bulk: int = 0,
                  lock_twin: bool = False, lock_project_version: bool = True,
                  project_name: str = "sim-app", crlf: bool = False, pyproject_head: str = "",
-                 first_release_by_fast_forward: bool = False, package_nested_version: bool = False) -> None:
+                 first_release_by_fast_forward: bool = False, package_nested_version: bool = False,
+                 early_merge: bool = False) -> None:
         self.sb, self.kind = sb, kind
         self.project_name, self.crlf, self.pyproject_head = project_name, crlf, pyproject_head
         self.package_nested_version = package_nested_version
@@ -709,6 +712,14 @@ class ReleasedRepo:
         if kind != "version-txt":
             self.set_version(r, self.dev1)
             self.g("commit", "-q", "-am", f"chore: open {self.dev1} dev cycle")
+        if early_merge:
+            self.g("switch", "-q", "-c", "early", "main")
+            self.edit(r, "early.txt", "early\n")
+            self.g("add", "early.txt")
+            self.g("commit", "-q", "-m", "feat: early")
+            self.g("switch", "-q", "develop")
+            self.g("merge", "-q", "--no-ff", "early", "-m", "feat: early (#3)")
+            self.g("branch", "-q", "-D", "early")
         self.g("push", "-q", "-u", "origin", "develop")
         # feature A, merged by pull request (a squash commit, as before the switch)
         self.edit(r, "app.txt", "line 1\nline 2 (feature A)\nline 3\n")

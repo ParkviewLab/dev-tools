@@ -23,8 +23,8 @@
 # older tag, waits for develop's required checks, and merges it with --merge
 # --match-head-commit, never --admin. A release picked onto main (a hotfix: a
 # pull request picked with `git cherry-pick -m 1`, then bumped and tagged, so that
-# the first-parent segment of main the release adds holds no promotion) has its
-# merge made otherwise: `git commit-tree` of the tree `back-merge-check
+# what the back-merge brings of main's first-parent line holds no promotion) has
+# its merge made otherwise: `git commit-tree` of the tree `back-merge-check
 # --merge-tree` gives, which in a code repository is the automatic merge with the
 # project's version lines of develop and the merge base set to main's, since the
 # plain merge conflicts on them by construction; the open-cycle commit follows as
@@ -32,9 +32,12 @@
 # the exception ruled on 2026-09-27, the direct back-merge with administrators
 # unbound for its one push, the conflict resolved by hand: decision 6 (d)'s repair
 # would bring develop's side into agreement with main's, the hotfix's older side.
-# Step 7, which refuses a version change that reached develop
-# during a promotion, seeks the promotion only in the release's own segment of
-# main. Each step first tests whether it
+# Step 7, which refuses a version change that reached develop during a
+# promotion, seeks the promotion on the tag's first-parent line as far as
+# origin/develop holds it, which is what the back-merge brings of main's own
+# history, an earlier release's promotion not yet back-merged included; before
+# it compares anything, it refuses a history in which develop and main have
+# more than one merge base, naming the exception. Each step first tests whether it
 # has already been done, so a second run after an interruption resumes. A branch
 # that develop has moved beyond is rebuilt from the new develop when a run finds it
 # and, in a repository that requires up-to-date branches, when develop moves while
@@ -346,23 +349,19 @@ fi
 
 # --- 7 to 9. refuse a known conflict, build, verify and push ---------------------------
 # The rule by which a release is picked onto main, in the same text as in
-# back-merge-check (a test holds the two copies equal). A promotion found where
+# back-merge-check (a test holds the two copies equal). What a back-merge brings of
+# main's own history is the tag's first-parent line as far as develop's tip holds
+# it: the release was promoted where a merge on that stretch has a second parent
+# develop holds, and picked onto main where none has. A promotion found where
 # there is none would let a version change that reached develop during a
 # promotion pass unseen, so a question git cannot answer returns 2, never
 # "picked".
-release_promotion() {  # $1 = the tag's commit, $2 = develop's side; prints the newest
-                       # merge of the release's first-parent segment of main whose second
-                       # parent is an ancestor of $2 (its promotion), or nothing for a
-                       # release picked onto main; returns 2 where git cannot answer
-  local tags rel line prev="" merges m rc
-  tags=$(git show-ref -d --tags) || return 2
-  rel=$(printf '%s\n' "$tags" | sed 's/\^{}$//' \
-        | awk '$2 ~ /^refs\/tags\/v[0-9]+[.][0-9]+[.][0-9]+$/ {printf " %s", $1} END {printf " "}') || return 2
-  if git rev-parse --verify --quiet "$1^1" >/dev/null; then
-    line=$(git rev-list --first-parent "$1^1") || return 2
-    prev=$(printf '%s\n' "$line" | awk -v rel="$rel" '!f && NF && index(rel, " " $1 " ") {print $1; f=1}') || return 2
-  fi
-  merges=$(git rev-list --first-parent --merges "$1" ${prev:+"^$prev"}) || return 2
+release_promotion() {  # $1 = the tag's commit, $2 = develop's tip; prints the newest merge on
+                       # the tag's first-parent line that $2 does not hold and whose second
+                       # parent it does (the release's promotion), or nothing for a release
+                       # picked onto main; returns 2 where git cannot answer
+  local merges m rc
+  merges=$(git rev-list --first-parent --merges "$1" --not "$2") || return 2
   for m in $merges; do
     rc=0; git merge-base --is-ancestor "$m^2" "$2" || rc=$?
     case "$rc" in
@@ -375,13 +374,21 @@ release_promotion() {  # $1 = the tag's commit, $2 = develop's side; prints the 
 }
 PROMO=""
 refuse_version_conflict() {  # 7.
-  local p2 v_promo v_dev
-  # The promotion is sought only in the release's own segment of main: below it lies
-  # the previous release's, which a release picked onto main (a hotfix) would
-  # otherwise be compared with.
+  local p2 v_promo v_dev bases rc n
+  # Develop and main must have one merge base, which is tested before anything is
+  # compared: where there are more, the part of main the back-merge brings can hold
+  # an earlier release's promotion that develop's version has since moved past, so
+  # the comparison below would prescribe decision 6 (a) wrongly, and a picked
+  # release's merge is made against one merge base only.
+  rc=0; bases="$(git merge-base --all origin/develop origin/main)" || rc=$?
+  (( rc <= 1 )) || die "git merge-base failed ($rc)"
+  n="$(printf '%s\n' "$bases" | grep -c . || true)"
+  [[ "$n" == 1 ]] || die "origin/develop and origin/main have $n merge bases, and git back-merge compares versions and makes the merge of a release picked onto main against one merge base only. Nothing is pushed. It needs a person: the exception for a back-merge that git back-merge refuses is the direct back-merge, with administrators unbound for its one push (ruled on 2026-09-27)."
+  # The promotion is sought on the tag's first-parent line as far as origin/develop
+  # holds it, which is what the back-merge brings of main's own history.
   PROMO="$(release_promotion "$TAGC" origin/develop)" || die "git cannot read the first-parent line of main below $TAG"
   if [[ -z "$PROMO" ]]; then
-    say "$TAG is a release picked onto main: its segment of main holds no promotion to compare"
+    say "$TAG is a release picked onto main: what the back-merge brings of main holds no promotion to compare"
     return 0
   fi
   p2="$(git rev-parse "$PROMO^2")"

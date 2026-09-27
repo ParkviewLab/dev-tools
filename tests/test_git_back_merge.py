@@ -784,7 +784,6 @@ class PickedReleases(BackMergeCase):
         self.sb.set_gh_state(r.gh_state())
         result = self.back_merge()
         self.assertRefused(result, "2 merge bases")
-        self.assertIn("v0.1.3 is a release picked onto main", result.stdout)
         self.assertNotIn("decision 6", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertNoResidue()
@@ -827,6 +826,35 @@ class PickedReleases(BackMergeCase):
         self.assertEqual(result.stdout.count(self.PICKED), 2)
         self.assertEqual(self.origin("show", "develop:moved-1.txt"), "moved-1")
         self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.3.dev0")
+
+    def test_a_promotion_not_yet_back_merged_is_seen_through_a_hotfix(self):
+        # v0.1.1 is promoted and develop's version changes during it; before its
+        # back-merge lands, v0.1.2 is picked onto main. Its back-merge brings v0.1.1's
+        # promotion too, so step 7 refuses the version change, decision 6 (a)
+        r = self.make("pyproject")
+        r.g("fetch", "-q", "origin")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, "0.1.1.dev1")
+        r.g("commit", "-q", "-am", "chore: dev build v0.1.1.dev1")
+        r.g("push", "-q", "origin", "develop")
+        r.hotfix()
+        self.sb.set_gh_state(r.gh_state())
+        result = self.back_merge()
+        self.assertRefused(result, "origin/develop's version is 0.1.1.dev1, but develop was promoted at 0.1.1.dev0")
+        self.assertIn("decision 6 (a)", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+    def test_a_first_release_whose_line_holds_pull_request_merges(self):
+        # develop merged, by a real merge, a pull request cut before its dev cycle
+        # opened, and main reached the first release by a fast-forward: that merge is on
+        # main's first-parent line, but develop holds it, so it is no promotion to compare
+        r = self.make("pyproject", first_release_by_fast_forward=True, early_merge=True)
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertNotIn("decision 6", self.out(result))
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
+        self.assertNoResidue()
 
     def test_a_first_release_reached_by_a_fast_forward(self):
         # no promotion commit, so it counts as picked; the automatic merge is clean,

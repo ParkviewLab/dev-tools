@@ -52,7 +52,9 @@
 #      merge conflicts or differs from M's tree, the tree of M must equal the
 #      automatic merge in which the project's version lines of M^1 and of the
 #      merge base are first set to main's version V, and that merge must be
-#      clean. M^1 and M^2 must then have exactly one merge base MB; MB' and D'
+#      clean. M^1 and M^2 must then have exactly one merge base MB, which is
+#      tested before the release's promotion is sought, and a history with more
+#      is refused with that reason; MB' and D'
 #      are MB and M^1 with those lines rewritten to V and nothing else changed,
 #      built as commits in the object store through a temporary index, touching
 #      no ref, index or working tree; and the merge is `git merge-tree
@@ -65,14 +67,15 @@
 #      package-lock.json the root's version and packages[""]'s. Only the quoted
 #      value changes (quote style, spacing, a CR line ending and a missing last
 #      line feed are kept), and a file without such a line is left as it is.
-#      A release is picked onto main when the first-parent segment of main that
-#      it adds holds no promotion: walking the tag's first-parent line from the
-#      tag's parent, the first commit that a release tag vX.Y.Z points at ends
-#      the segment (the whole line where there is none), and the release is a
-#      promotion when some merge commit in the segment has a second parent that
-#      is an ancestor of M^1. A first release that main reached by a
-#      fast-forward has no promotion commit, so it counts as picked; the
-#      automatic merge, tried first, still passes it as before.
+#      A release is picked onto main when what the back-merge brings of main's
+#      own history, the tag's first-parent line as far as the base (develop's
+#      tip) holds it, has no merge commit whose second parent the base holds;
+#      where one has, the release was made by promotion, possibly an earlier
+#      release's not yet back-merged, and the automatic merge alone is taken.
+#      The base, not M^1, is develop's side here, so that a head whose merge
+#      has a stale first parent cannot hide a promotion. A first release that
+#      main reached by a fast-forward has no promotion commit on that stretch,
+#      so it counts as picked; the automatic merge, tried first, still passes it.
 #   4. The version at M equals main's. Without C, the head's version equals
 #      main's. C is admitted only where the version file is pyproject.toml or
 #      package.json; a repository whose version is in VERSION.txt skips the open
@@ -281,23 +284,19 @@ read_name() {  # $1 = commit, $2 = a name for its reason; sets NAME to the proje
 
 # --- a release picked onto main (condition 3) ---
 # The rule by which a release is picked onto main, in the same text as in
-# git-back-merge (a test holds the two copies equal). A promotion found where
+# git-back-merge (a test holds the two copies equal). What a back-merge brings of
+# main's own history is the tag's first-parent line as far as develop's tip holds
+# it: the release was promoted where a merge on that stretch has a second parent
+# develop holds, and picked onto main where none has. A promotion found where
 # there is none would let a version change that reached develop during a
 # promotion pass unseen, so a question git cannot answer returns 2, never
 # "picked".
-release_promotion() {  # $1 = the tag's commit, $2 = develop's side; prints the newest
-                       # merge of the release's first-parent segment of main whose second
-                       # parent is an ancestor of $2 (its promotion), or nothing for a
-                       # release picked onto main; returns 2 where git cannot answer
-  local tags rel line prev="" merges m rc
-  tags=$(git show-ref -d --tags) || return 2
-  rel=$(printf '%s\n' "$tags" | sed 's/\^{}$//' \
-        | awk '$2 ~ /^refs\/tags\/v[0-9]+[.][0-9]+[.][0-9]+$/ {printf " %s", $1} END {printf " "}') || return 2
-  if git rev-parse --verify --quiet "$1^1" >/dev/null; then
-    line=$(git rev-list --first-parent "$1^1") || return 2
-    prev=$(printf '%s\n' "$line" | awk -v rel="$rel" '!f && NF && index(rel, " " $1 " ") {print $1; f=1}') || return 2
-  fi
-  merges=$(git rev-list --first-parent --merges "$1" ${prev:+"^$prev"}) || return 2
+release_promotion() {  # $1 = the tag's commit, $2 = develop's tip; prints the newest merge on
+                       # the tag's first-parent line that $2 does not hold and whose second
+                       # parent it does (the release's promotion), or nothing for a release
+                       # picked onto main; returns 2 where git cannot answer
+  local merges m rc
+  merges=$(git rev-list --first-parent --merges "$1" --not "$2") || return 2
   for m in $merges; do
     rc=0; git merge-base --is-ancestor "$m^2" "$2" || rc=$?
     case "$rc" in
@@ -388,9 +387,18 @@ plain_merge() {  # $1, $2 = the two sides; sets AUTO (the tree), AUTO_RC (0 clea
   AUTO=${out%%$'\n'*}
   AUTO_FILES=$(printf '%s\n' "$out" | sed 1d | tr '\n' ' ' | sed 's/ $//')
 }
-picked_release() {  # $1 = develop's side, $2 = main's side; 0 where the merge of a release
-                    # picked onto main applies, having set V_PICK and VFILES
-  local tagc promo
+# Condition 3's merge for a release picked onto main. It returns 1 where it does
+# not apply: outside tag mode, where the version is in neither pyproject.toml nor
+# package.json, where the tag is not on main's side, or for a release made by
+# promotion. Otherwise it returns 0, having set NORM to the merge's tree, or
+# NORM_WHY to the reason there is none. Develop and main must have one merge
+# base, which is tested before the promotion is sought: where there are more, the
+# part of main a back-merge brings can hold an earlier release's promotion that
+# develop's version has since moved past, and no version comparison or rewrite
+# against one merge base applies.
+picked_tree() {  # $1 = develop's side, $2 = main's side, $3 = develop's tip (the base)
+  local tagc promo bases rc n mbp dp out
+  NORM=""; NORM_WHY=""
   [ -n "$TAG" ] || return 1
   case "$KIND" in
     pyproject) VFILES="pyproject.toml uv.lock" ;;
@@ -400,16 +408,6 @@ picked_release() {  # $1 = develop's side, $2 = main's side; 0 where the merge o
   [ "$(sot_kind_at "$1")" = "$KIND" ] && [ "$(sot_kind_at "$2")" = "$KIND" ] || return 1
   tagc=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}") || return 1
   git merge-base --is-ancestor "$tagc" "$2" || return 1
-  promo=$(release_promotion "$tagc" "$1") || die "git cannot read the first-parent line of main below $TAG"
-  [ -z "$promo" ] || return 1
-  [ -n "$V_MAIN" ] || no_version main "$MAIN" main
-  [ "v$V_MAIN" = "$TAG" ] || fail "main's version $V_MAIN is not the tag's ($TAG)"
-  V_PICK=$V_MAIN
-}
-normalised_merge() {  # $1 = develop's side, $2 = main's side; sets NORM to the tree, or
-                      # NORM_WHY to the reason there is none
-  local bases rc n mbp dp out
-  NORM=""; NORM_WHY=""
   rc=0; bases=$(git merge-base --all "$1" "$2") || rc=$?
   [ "$rc" -le 1 ] || die "git merge-base failed ($rc)"
   n=$(printf '%s\n' "$bases" | grep -c . || true)
@@ -417,8 +415,13 @@ normalised_merge() {  # $1 = develop's side, $2 = main's side; sets NORM to the 
     NORM_WHY="develop and main have $n merge bases, and the project's version lines can be set to main's against a single merge base only"
     return 0
   fi
+  promo=$(release_promotion "$tagc" "$3") || die "git cannot read the first-parent line of main below $TAG"
+  [ -z "$promo" ] || return 1
+  [ -n "$V_MAIN" ] || no_version main "$MAIN" main
+  [ "v$V_MAIN" = "$TAG" ] || fail "main's version $V_MAIN is not the tag's ($TAG)"
+  V_PICK=$V_MAIN
   if [ "$KIND" = pyproject ] && [ -z "$PROJ_MAIN" ]; then
-    NORM_WHY="the project's name, which owns its block in uv.lock, cannot be read from main: $(tr '\n' ' ' < "$TMPD/why-name-main" | sed 's/ *$//')"
+    NORM_WHY="for a release picked onto main, the project's name, which owns its block in uv.lock, cannot be read from main: $(tr '\n' ' ' < "$TMPD/why-name-main" | sed 's/ *$//')"
     return 0
   fi
   normalise "$bases"; mbp=$NORMALISED
@@ -426,7 +429,7 @@ normalised_merge() {  # $1 = develop's side, $2 = main's side; sets NORM to the 
   rc=0; out=$(git merge-tree --write-tree --no-messages --name-only --merge-base="$mbp" "$dp" "$2") || rc=$?
   [ "$rc" -le 1 ] || die "git merge-tree --merge-base failed ($rc): it needs git 2.40 or later"
   if [ "$rc" = 1 ]; then
-    NORM_WHY="the merge with the project's version lines set to main's $V_PICK conflicts in: $(printf '%s\n' "$out" | sed 1d | tr '\n' ' ' | sed 's/ $//')"
+    NORM_WHY="for a release picked onto main, the merge with the project's version lines set to main's $V_PICK conflicts in: $(printf '%s\n' "$out" | sed 1d | tr '\n' ' ' | sed 's/ $//')"
     return 0
   fi
   NORM=${out%%$'\n'*}
@@ -447,8 +450,7 @@ if [ "$MODE" = merge-tree ]; then
     ok "the automatic merge of develop and main"
     echo "$AUTO"; exit 0
   fi
-  if picked_release "$DEV" "$MAIN"; then
-    normalised_merge "$DEV" "$MAIN"
+  if picked_tree "$DEV" "$MAIN" "$DEV"; then
     [ -z "$NORM_WHY" ] || fail "$NORM_WHY"
     ok "the automatic merge with the project's version lines of develop and the merge base set to main's $V_PICK (a release picked onto main)"
     echo "$NORM"; exit 0
@@ -500,11 +502,10 @@ plain_merge "$P1" "$P2"
 TREE=$(git rev-parse "$M^{tree}")
 if [ "$AUTO_RC" = 0 ] && [ "$AUTO" = "$TREE" ]; then
   ok "tree of the merge equals the automatic merge ($(git rev-parse --short "$TREE"))"
-elif picked_release "$P1" "$P2"; then
-  normalised_merge "$P1" "$P2"
+elif picked_tree "$P1" "$P2" "$BASE"; then
   if [ -n "$NORM_WHY" ]; then
-    if [ "$AUTO_RC" = 1 ]; then fail "the automatic merge of the parents conflicts; for a release picked onto main, $NORM_WHY: a hand-resolved back-merge needs a person's review"; fi
-    fail "tree of $(short "$M") differs from the automatic merge of its parents; for a release picked onto main, $NORM_WHY"
+    if [ "$AUTO_RC" = 1 ]; then fail "the automatic merge of the parents conflicts; $NORM_WHY: a hand-resolved back-merge needs a person's review"; fi
+    fail "tree of $(short "$M") differs from the automatic merge of its parents; $NORM_WHY"
   fi
   [ "$NORM" = "$TREE" ] || fail "tree of $(short "$M") differs from the automatic merge with the project's version lines of develop and the merge base set to main's $V_PICK (a release picked onto main): $(git diff --stat "$NORM" "$TREE" | tail -1)"
   ok "tree of the merge equals the automatic merge with the project's version lines of develop and the merge base set to main's $V_PICK (a release picked onto main)"
