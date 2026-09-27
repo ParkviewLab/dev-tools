@@ -13,7 +13,7 @@
 #
 #   git back-merge             # the newest release tag vX.Y.Z
 #   git back-merge v1.2.3      # a named release tag, which must be main's version
-#   git back-merge --dry-run   # build and check locally; push, open and merge nothing
+#   git back-merge --dry-run   # build and check locally; push, open, merge and pull nothing
 #
 # In a temporary worktree it builds back-merge-<tag> from origin/develop with
 # `git merge --no-ff origin/main`, adds in a code repository the open-cycle commit
@@ -269,6 +269,8 @@ finish() {  # 13. clean up and sync
       say "cannot read the state of $devwt; not pulled"
     elif [[ -n "$st" ]]; then
       say "$devwt has local changes; not pulled"
+    elif [[ "$DRY" == 1 ]]; then
+      say "(dry run) $devwt would be fast-forwarded"
     else
       git -C "$devwt" pull --quiet --ff-only && say "fast-forwarded $devwt" || say "could not fast-forward $devwt; pull it by hand"
     fi

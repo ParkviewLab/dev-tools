@@ -321,6 +321,20 @@ class HappyPaths(BackMergeCase):
         self.assertEqual(self.sb.gh_state()["prs"], [])
         self.assertNoResidue()
 
+    def test_a_dry_run_after_the_back_merge_has_landed_moves_nothing(self):
+        # step 13 runs when the back-merge has landed; a dry run changes nothing on
+        # this machine either, the develop worktree included
+        r = self.make("pyproject")
+        self.assertOk(self.back_merge())
+        self.sb.git(r.dev, "reset", "-q", "--hard", "HEAD~1")
+        before = self.sb.git(r.dev, "rev-parse", "HEAD")
+        result = self.back_merge("--dry-run")
+        self.assertOk(result)
+        self.assertIn("already an ancestor of origin/develop", result.stdout)
+        self.assertIn(f"(dry run) {r.dev} would be fast-forwarded\n", result.stdout)
+        self.assertNotIn(f"fast-forwarded {r.dev}\n", result.stdout)
+        self.assertEqual(self.sb.git(r.dev, "rev-parse", "HEAD"), before)
+
 
 class TheRelease(BackMergeCase):
 
