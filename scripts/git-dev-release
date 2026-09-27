@@ -124,6 +124,12 @@ esac
 slug="${slug%.git}"
 allowed="$(gh api "repos/$slug" --jq .allow_merge_commit)" \
   || { echo "git dev-release: gh cannot read $slug's settings" >&2; exit 1; }
+# GitHub returns the setting only to a caller with admin rights; read as "not
+# switched", a missing one would let the command push to develop (as git back-merge)
+case "$allowed" in
+  true|false) ;;
+  *) echo "git dev-release: gh read no allow_merge_commit setting for $slug ('$allowed'); GitHub returns it only to a caller with admin rights on the repository" >&2; exit 1 ;;
+esac
 if [[ "$allowed" == true ]]; then
   if [[ "$OPEN" == 1 ]]; then
     echo "git dev-release: $slug allows merge commits, so develop takes no direct push: the open cycle arrives as the second commit of the back-merge pull request. After a release, run git back-merge." >&2
