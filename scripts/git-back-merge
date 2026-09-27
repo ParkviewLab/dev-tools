@@ -38,8 +38,9 @@
 # ruled on 2026-09-27, the direct back-merge with administrators unbound for its
 # one push, the conflict resolved by hand: decision 6 (d)'s repair would bring
 # develop's side into agreement with main's, the hotfix's older side. An error of
-# the check (exit 2: a git before 2.40, a shallow clone) is reported as such, with
-# no repair.
+# the check (exit 2, such as a git before 2.40 where a picked release needs
+# `git merge-tree --merge-base`) is reported as such, with no repair. A shallow
+# repository is refused at step 1, before anything is compared.
 # Step 7, which refuses a version change that reached develop during a
 # promotion, seeks the promotion on the tag's first-parent line as far as
 # origin/develop holds it, which is what the back-merge brings of main's own
@@ -118,6 +119,10 @@ git rev-parse --git-dir >/dev/null 2>&1 || die "not in a git repository"
 git remote get-url origin >/dev/null 2>&1 || die "this repository has no remote named origin"
 COMMON="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
 step "1. fetch origin"
+# A shallow repository shortens main's first-parent line, which step 7 reads, and
+# makes ancestry and merge-base answers unreliable; back-merge-check refuses one too.
+[[ "$(git rev-parse --is-shallow-repository)" == false ]] \
+  || die "shallow repository: ancestry and merge-base answers are unreliable, and step 7 would read a shortened first-parent line of main; fetch the full history (git fetch --unshallow origin) and run git back-merge again"
 git fetch --quiet --prune --tags origin
 git rev-parse -q --verify refs/remotes/origin/main >/dev/null || die "origin has no main branch"
 git rev-parse -q --verify refs/remotes/origin/develop >/dev/null || die "origin has no develop branch"

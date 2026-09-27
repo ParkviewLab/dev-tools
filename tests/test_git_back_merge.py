@@ -756,6 +756,21 @@ class PickedReleases(BackMergeCase):
         self.assertIn("conflicts in: app.txt", result.stderr)
         self.assertTheException(result)
 
+    def test_a_shallow_clone_is_refused_before_anything_is_compared(self):
+        # at depth 4, step 7 read a shortened first-parent line of main and prescribed a
+        # wrong decision 6 (a) repair; the command now refuses a shallow repository at
+        # step 1, as back-merge-check does
+        r = self.make_picked("pyproject")
+        shallow = self.sb.tmp / "shallow"
+        self.sb.git(self.sb.tmp, "clone", "-q", "--depth", "4", "--no-single-branch", "--branch", "develop",
+                    "file://" + str(r.origin), str(shallow))
+        self.assertEqual(self.sb.git(shallow, "rev-parse", "--is-shallow-repository"), "true")
+        result = self.back_merge("--dry-run", cwd=shallow)
+        self.assertRefused(result, "shallow repository")
+        self.assertIn("fetch the full history", result.stderr)
+        self.assertNotIn("== 2.", result.stdout)
+        self.assertNotIn("decision 6", result.stderr)
+
     def test_an_error_of_the_check_is_reported_with_no_repair(self):
         # a git before 2.40 has no merge-tree --merge-base, so back-merge-check
         # --merge-tree exits 2: an error, which no repair of the history mends
