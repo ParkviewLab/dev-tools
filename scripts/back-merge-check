@@ -33,8 +33,9 @@
 #             main: the automatic merge where it is clean, else, for a release
 #             picked onto main, the merge of condition 3 below; where there is
 #             none it exits 1, its last line giving the reason, which for a
-#             conflict ends " conflicts in: " and the paths. git back-merge
-#             builds the merge of a release picked onto main from it.
+#             conflict ends " conflicts in: " and the paths; on an error, as
+#             below, it exits 2. git back-merge builds the merge of a release
+#             picked onto main from it.
 #
 # `git back-merge` runs this on its own branch before it pushes, and, in a
 # repository that has switched to merge commits, the version guard runs it in its
@@ -55,10 +56,10 @@
 #      clean. M^1 and M^2 must then have exactly one merge base MB, which is
 #      tested before the release's promotion is sought, and a history with more
 #      is refused with that reason. Only the version change the release flow
-#      makes is taken from main: MB's version must be a release R and M^1's
-#      R's next-patch placeholder, which R's back-merge opened (below, condition
-#      4), and any other version is refused, named. MB' and D'
-#      are MB and M^1 with those lines rewritten to V and nothing else changed,
+#      makes is taken from main: MB's version must be a release R, and M^1's
+#      the next-patch placeholder of R that condition 4 computes, which R's
+#      back-merge opened; any other version is refused, named. MB' and D' are MB
+#      and M^1 with those lines rewritten to V and nothing else changed,
 #      built as commits in the object store through a temporary index, touching
 #      no ref, index or working tree; and the merge is `git merge-tree
 #      --write-tree --merge-base=MB' D' M^2`. The lines are exactly those
@@ -66,8 +67,8 @@
 #      pyproject.toml's [project] table; in uv.lock, the first version line of
 #      the [[package]] block named for the project, its [project] table's name
 #      in main's pyproject.toml, normalised as PEP 503 gives it; package.json's
-#      top-level version; and in
-#      package-lock.json the root's version and packages[""]'s. Only the quoted
+#      top-level version; and in package-lock.json the root's version and
+#      packages[""]'s. Only the quoted
 #      value changes (quote style, spacing, a CR line ending and a missing last
 #      line feed are kept), and a file without such a line is left as it is.
 #      A release is picked onto main when what the back-merge brings of main's
@@ -95,10 +96,11 @@
 #   5. In tag mode, as above.
 #   6. A shallow repository is refused outright.
 #
-# Versions are the project's own, read from the committed trees as the version
-# guard reads them: [project].version in pyproject.toml (parsed as TOML) and the
-# top-level "version" in package.json (parsed as JSON), and VERSION.txt with its
-# whitespace removed. A version file that cannot be parsed, or that holds no such
+# Versions are the project's own, read from the committed trees: [project].version
+# in pyproject.toml (parsed as TOML) and the top-level "version" in package.json
+# (parsed as JSON), as the version guard reads them, and VERSION.txt with its
+# whitespace stripped, where the guard compares it whole. A version file that
+# cannot be parsed, or that holds no such
 # version (a dynamic one, say), fails the check. The project's name, whose
 # [[package]] block in uv.lock holds its locked version, is the [project] table's
 # name, read by the same parser and normalised as PEP 503 gives it. pyproject.toml
@@ -106,8 +108,9 @@
 # runners, else by the Python 3.11 or later that uv provides, which a
 # pyproject.toml repository requires; package.json by python3, else by node;
 # where nothing can parse the file, the check exits 2.
-# Exit 0 = pass, 1 = not a clean back-merge, 2 = usage or repository error; with
-# --merge-tree, 0 = the tree is printed and 1 = there is none.
+# Exit 0 = pass, 1 = not a clean back-merge, 2 = usage or repository error (a
+# shallow clone, a git before 2.40, no parser for the version file); with
+# --merge-tree, 0 = the tree is printed, 1 = there is none, 2 = such an error.
 # Portable to bash 3.2 (macOS) and bash 5 (the ubuntu runners). Needs git 2.40
 # or later, for `git merge-tree --merge-base`. See the handbook's releases.md
 # and ci.md.

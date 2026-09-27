@@ -28,10 +28,15 @@
 # --merge-tree` gives, which in a code repository is the automatic merge with the
 # project's version lines of develop and the merge base set to main's, since the
 # plain merge conflicts on them by construction; the open-cycle commit follows as
-# for any release. Where that merge conflicts, the command refuses and prescribes
-# the exception ruled on 2026-09-27, the direct back-merge with administrators
-# unbound for its one push, the conflict resolved by hand: decision 6 (d)'s repair
-# would bring develop's side into agreement with main's, the hotfix's older side.
+# for any release. That merge is taken only for the version change the release
+# flow makes: the merge base at a release R, and develop at R's next-patch
+# placeholder, which R's back-merge opened. Where the check gives no such merge,
+# because the merge conflicts or develop's version changed otherwise, the command
+# refuses and prescribes the exception ruled on 2026-09-27, the direct back-merge
+# with administrators unbound for its one push, the conflict resolved by hand:
+# decision 6 (d)'s repair would bring develop's side into agreement with main's,
+# the hotfix's older side. An error of the check (exit 2: a git before 2.40, a
+# shallow clone) is reported as such, with no repair.
 # Step 7, which refuses a version change that reached develop during a
 # promotion, seeks the promotion on the tag's first-parent line as far as
 # origin/develop holds it, which is what the back-merge brings of main's own
