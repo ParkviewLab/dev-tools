@@ -129,7 +129,7 @@ TAGC="$(git rev-parse "$TAG^{commit}")"
 ancestor "$TAGC" origin/main || die "$TAG is not on origin/main"
 KIND="$(sot_kind_at origin/main)"
 [[ "$KIND" != none ]] || die "origin/main has no version file _sot.sh reads (pyproject.toml, package.json or VERSION.txt)"
-V_MAIN="$(sot_read_at origin/main "$KIND")"
+V_MAIN="$(sot_read_at origin/main "$KIND")" || die "cannot read the project's own version on origin/main"
 [[ "v$V_MAIN" == "$TAG" ]] || die "origin/main's version is $V_MAIN, not $TAG's: name the tag of the newest release, or see what reached main after $TAG"
 BR="back-merge-$TAG"
 say "$TAG ($(git rev-parse --short "$TAGC")); the branch is $BR"
@@ -248,7 +248,7 @@ if [[ "$REPAIRED" == 1 ]]; then
     || die "the release run's changelog job failed, and $TAG has no GitHub Release: repair the release first (the handbook's releases.md, \"Repairing a release whose changelog job failed\")"
   say "the release run's changelog job failed and was repaired by hand; accepted"
 fi
-V_MAIN="$(sot_read_at origin/main "$KIND")"
+V_MAIN="$(sot_read_at origin/main "$KIND")" || die "cannot read the project's own version on origin/main"
 [[ "v$V_MAIN" == "$TAG" ]] || die "origin/main's version is now $V_MAIN, not $TAG's"
 say "the release has concluded"
 
@@ -274,7 +274,7 @@ finish() {  # 13. clean up and sync
     fi
   fi
   if ancestor "$TAGC" origin/develop; then
-    say "origin/develop carries $TAG; its version is $(sot_read_at origin/develop "$KIND")"
+    say "origin/develop carries $TAG; its version is $(sot_read_at origin/develop "$KIND" || true)"
   fi
   # The open working branches that do not yet contain the new develop: every
   # branch on origin but the long-lived ones and the back-merge branches, each
@@ -376,7 +376,8 @@ refuse_version_conflict() {  # 7.
     return 0
   fi
   p2="$(git rev-parse "$PROMO^2")"
-  v_promo="$(sot_read_at "$p2" "$KIND")"; v_dev="$(sot_read_at origin/develop "$KIND")"
+  v_promo="$(sot_read_at "$p2" "$KIND")" || die "cannot read the project's own version develop was promoted at ($(git rev-parse --short "$p2"))"
+  v_dev="$(sot_read_at origin/develop "$KIND")" || die "cannot read the project's own version on origin/develop"
   [[ "$v_promo" == "$v_dev" ]] && return 0
   die "origin/develop's version is $v_dev, but develop was promoted at $v_promo: a version change reached develop during the release, and the back-merge would conflict on the version line. Repair it (decision 6 (a) of the real-merges design): one reviewed commit restoring develop's version lines (the version file and its lockfile) to $v_promo, pushed to develop directly (with enforce_admins switched off and on again where administrators are bound); then run git back-merge again."
 }

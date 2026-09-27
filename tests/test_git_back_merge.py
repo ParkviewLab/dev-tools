@@ -776,6 +776,57 @@ class PickedReleases(BackMergeCase):
         self.assertNoResidue()
 
 
+class ProjectVersion(BackMergeCase):
+    """git back-merge reads a commit's version with _sot.sh's sot_read_at, which reads the
+    project's own, as the version guard does: [project].version in pyproject.toml, the
+    top-level "version" in package.json; a file that cannot be parsed is an error."""
+
+    def test_another_tables_version_line_before_the_project_table(self):
+        r = self.make("pyproject", pyproject_head='[tool.x]\nversion = "0.0.9"\n\n')
+        result = self.back_merge()
+        self.assertOk(result)
+        self.assertIn("origin/develop carries v0.1.1; its version is 0.1.2.dev0", result.stdout)
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
+        self.assertIn('[tool.x]\nversion = "0.0.9"', self.origin("show", "develop:pyproject.toml"))
+
+    def test_a_nested_version_before_the_top_level_one(self):
+        # step 7 compares develop's version with the version it was promoted at
+        r = self.make("package", package_nested_version=True)
+        r.g("fetch", "-q", "origin")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        r.set_version(r.releaser, "3.5.1-dev1")
+        r.g("commit", "-q", "-am", "chore: dev build v3.5.1-dev1")
+        r.g("push", "-q", "origin", "develop")
+        result = self.back_merge()
+        self.assertRefused(result, "origin/develop's version is 3.5.1-dev1, but develop was promoted at 3.5.1-dev0")
+        self.assertNoResidue()
+
+    def test_an_unparseable_version_file_on_develop(self):
+        self.make("pyproject")
+        r = self.repo
+        r.g("fetch", "-q", "origin")
+        r.g("merge", "-q", "--ff-only", "origin/develop")
+        text = (r.releaser / "pyproject.toml").read_text()
+        (r.releaser / "pyproject.toml").write_text(text.replace('requires-python = ">=3.11"', 'requires-python = ">=3.11'))
+        r.g("commit", "-q", "-am", "build: an unterminated string (#4)")
+        r.g("push", "-q", "origin", "develop")
+        result = self.back_merge()
+        self.assertRefused(result, "pyproject.toml at origin/develop cannot be parsed")
+        self.assertIn("cannot read the project's own version on origin/develop", result.stderr)
+        self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
+        self.assertNoResidue()
+
+    def test_a_python3_without_tomllib_reads_through_uv(self):
+        r = self.make("pyproject")
+        shadow = self.sb.tmp / "no-tomllib"
+        shadow.mkdir()
+        (shadow / "tomllib.py").write_text("raise ImportError('no tomllib in this Python')\n")
+        log = self.sb.tmp / "uv-run.log"
+        self.assertOk(self.back_merge(env={"PYTHONPATH": str(shadow), "FAKE_UV_RUN_LOG": str(log)}))
+        self.assertIn("run --no-project --quiet --python >=3.11\n", log.read_text())
+        self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
+
+
 SHORT = {"GIT_BACK_MERGE_TIMEOUT": "4", "GIT_BACK_MERGE_POLL": "1"}
 
 

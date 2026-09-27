@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,8 +72,11 @@ def uv_lock_text(name: str, version: str, bulk: int = 0, twin: str | None = None
         'source = { registry = "https://pypi.org/simple" }\n' for i in range(bulk))
 
 
-def package_json_text(name: str, version: str) -> str:
-    return json.dumps({"name": name, "version": version, "private": True,
+def package_json_text(name: str, version: str, nested_version: bool = False) -> str:
+    # nested_version puts an object holding a "version" of its own before the
+    # top-level one, which is the project's
+    head = {"name": name, **({"config": {"version": "9.9.9"}} if nested_version else {})}
+    return json.dumps({**head, "version": version, "private": True,
                        "dependencies": {"left-pad": "^1.3.0"}}, indent=2) + "\n"
 
 
@@ -96,11 +100,23 @@ def normalised(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def set_project_version_text(text: str, version: str) -> str:
+    """pyproject.toml's text with its [project] table's version set, as uv version writes it."""
+    lines, inside = text.splitlines(keepends=True), False
+    for i, line in enumerate(lines):
+        if line.startswith("["):
+            inside = line.strip() == "[project]"
+        elif inside and line.startswith('version = "'):
+            lines[i] = re.sub(r'^version = "[^"]*"', f'version = "{version}"', line)
+            break
+    return "".join(lines)
+
+
 def set_pyproject_version(wt: Path, version: str, lock: bool = True) -> None:
     p = wt / "pyproject.toml"
     text = p.read_text()
     name = re.search(r'(?m)^name = "([^"]*)"', text).group(1)
-    p.write_text(re.sub(r'(?m)^version = "[^"]*"', f'version = "{version}"', text, count=1))
+    p.write_text(set_project_version_text(text, version))
     if lock and (wt / "uv.lock").exists():
         set_uv_lock_version(wt, normalised(name), version)
 
@@ -180,7 +196,10 @@ def next_placeholder(kind: str, version: str) -> str | None:
 # ---------------------------------------------------------------- the fakes
 
 FAKE_UV = r'''#!/usr/bin/env python3
-# A fake uv: `uv version <v>` and `uv run --quiet python -c <code>`, all _sot.sh needs.
+# A fake uv: `uv version <v>`, which sets the [project] table's version as uv does,
+# and `uv run [--quiet] [--no-project] [--python <request>] python ...`, all _sot.sh
+# and back-merge-check need; the Python it runs is its own, as uv's would be, so a
+# PYTHONPATH a test sets to shadow tomllib does not reach it.
 import os, re, subprocess, sys
 a = sys.argv[1:]
 if a[:1] == ["version"] and len(a) >= 2:
@@ -189,7 +208,12 @@ if a[:1] == ["version"] and len(a) >= 2:
     v = [x for x in a[1:] if not x.startswith("-")][0]
     text = open("pyproject.toml").read()
     name = re.sub(r"[-_.]+", "-", re.search(r'(?m)^name = "([^"]*)"', text).group(1)).lower()
-    open("pyproject.toml", "w").write(re.sub(r'(?m)^version = "[^"]*"', 'version = "%s"' % v, text, count=1))
+    lines, inside = text.splitlines(True), False
+    for i, l in enumerate(lines):
+        if l.startswith("["): inside = l.strip() == "[project]"
+        elif inside and l.startswith('version = "'):
+            lines[i] = re.sub(r'^version = "[^"]*"', 'version = "%s"' % v, l); break
+    open("pyproject.toml", "w").write("".join(lines))
     if os.path.exists("uv.lock"):
         lines = open("uv.lock").read().splitlines(True); inside = False
         for i, l in enumerate(lines):
@@ -201,9 +225,14 @@ if a[:1] == ["version"] and len(a) >= 2:
         sys.stderr.write("error: Failed to build the project\n"); sys.exit(1)
     sys.exit(0)
 if a[:1] == ["run"]:
-    rest = [x for x in a[1:] if x != "--quiet"]
+    rest = a[1:]
+    while rest and rest[0] in ("--quiet", "--no-project", "--python"):
+        rest = rest[2:] if rest[0] == "--python" else rest[1:]
     if rest[:1] == ["python"]:
-        sys.exit(subprocess.call([sys.executable] + rest[1:]))
+        if os.environ.get("FAKE_UV_RUN_LOG"):
+            open(os.environ["FAKE_UV_RUN_LOG"], "a").write(" ".join(a[:a.index("python")]) + "\n")
+        env = dict(os.environ); env.pop("PYTHONPATH", None)
+        sys.exit(subprocess.call([sys.executable] + rest[1:], env=env))
 sys.stderr.write("fake uv: unsupported %r\n" % a); sys.exit(2)
 '''
 
@@ -596,7 +625,9 @@ class ReleasedRepo:
     [project] table. lock_bulk pads the lockfile with that many dependency entries after the
     project's own, to the size of a real one. lock_twin adds a dependency named
     twin whose version is the release's, v2, throughout; lock_project_version=False
-    leaves uv.lock without the project's version. first_release_by_fast_forward
+    leaves uv.lock without the project's version. package_nested_version puts in
+    package.json an object with a "version" of its own before the top-level one.
+    first_release_by_fast_forward
     leaves v1 untagged and brings main to develop by a fast-forward rather than a
     promotion merge, so that v2 is a first release with no promotion commit.
     land_back_merge() then lands v2's back-merge on develop, and hotfix() releases
@@ -614,9 +645,10 @@ class ReleasedRepo:
                  changelog: bool | None = None, lockfile: bool = True, lock_bulk: int = 0,
                  lock_twin: bool = False, lock_project_version: bool = True,
                  project_name: str = "sim-app", crlf: bool = False, pyproject_head: str = "",
-                 first_release_by_fast_forward: bool = False) -> None:
+                 first_release_by_fast_forward: bool = False, package_nested_version: bool = False) -> None:
         self.sb, self.kind = sb, kind
         self.project_name, self.crlf, self.pyproject_head = project_name, crlf, pyproject_head
+        self.package_nested_version = package_nested_version
         self.lock_bulk, self.lock_twin, self.lock_project_version = lock_bulk, lock_twin, lock_project_version
         self.v1, self.v2, self.placeholder, self.dev1 = self.VERSIONS[kind]
         self.tag1, self.tag2 = "v" + self.v1, "v" + self.v2
@@ -771,7 +803,8 @@ class ReleasedRepo:
                     normalised(self.project_name), version, self.lock_bulk, self.v2 if self.lock_twin else None, self.lock_project_version))
         elif self.kind == "package":
             crlf = (lambda t: t.replace("\n", "\r\n")) if self.crlf else (lambda t: t)
-            (wt / "package.json").write_bytes(crlf(package_json_text("sim-node", version)).encode())
+            (wt / "package.json").write_bytes(crlf(package_json_text(
+                "sim-node", version, self.package_nested_version)).encode())
             if lockfile:
                 (wt / "package-lock.json").write_bytes(crlf(package_lock_text(
                     "sim-node", version, self.lock_bulk, self.v2 if self.lock_twin else None)).encode())
@@ -787,10 +820,10 @@ class ReleasedRepo:
             (wt / "VERSION.txt").write_text(version + "\n")
 
     def version_at(self, rev: str, cwd: Path | None = None) -> str:
+        """The project's own version at rev: [project].version, the top-level version, VERSION.txt."""
         cwd = cwd or self.releaser
         if self.kind == "pyproject":
-            text = self.sb.git(cwd, "show", f"{rev}:pyproject.toml")
-            return re.search(r'(?m)^version = "([^"]*)"', text).group(1)
+            return tomllib.loads(self.sb.git(cwd, "show", f"{rev}:pyproject.toml"))["project"]["version"]
         if self.kind == "package":
             return json.loads(self.sb.git(cwd, "show", f"{rev}:package.json"))["version"]
         return self.sb.git(cwd, "show", f"{rev}:VERSION.txt").strip()

@@ -154,8 +154,9 @@ class MainScenario(CheckCase):
         wt = self.branch("x-no-version", self.M)
         text = (wt / "pyproject.toml").read_text()
         (wt / "pyproject.toml").write_text("\n".join(l for l in text.split("\n") if not l.startswith("version")))
-        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_all("chore: a dynamic version")),
-                           "no version line in head's pyproject.toml")
+        result = self.check(self.BASE, self.commit_all("chore: a dynamic version"))
+        self.assertOutcome(FAIL, result, "cannot read the project's own version of head")
+        self.assertIn("holds no static version in its [project] table", result.stdout)
 
     def test_10_second_parent_is_a_working_branch(self):
         wt = self.branch("x-feature-src", self.P)
@@ -295,10 +296,17 @@ class MainScenario(CheckCase):
                            "the open-cycle commit changes")
 
     def test_open_cycle_adding_a_line_that_begins_with_plus_signs(self):
-        # in a -U0 diff it reads "+++...", the form of a file header
+        # in a -U0 diff it reads "+++...", the form of a file header. As a TOML
+        # statement it does not parse, so reading the version refuses it first;
+        # inside a multi-line string it parses, and the line count refuses it
         wt = self.open_cycle_on_m("x-plusplus")
         with open(wt / "pyproject.toml", "a") as fh:
             fh.write("++injected\n")
+        self.assertOutcome(FAIL, self.check(self.BASE, self.commit_everything(), tag="v0.1.1"),
+                           "cannot be parsed")
+        wt = self.open_cycle_on_m("x-plusplus-in-a-string")
+        with open(wt / "pyproject.toml", "a") as fh:
+            fh.write('notes = """\n++injected\n"""\n')
         self.assertOutcome(FAIL, self.check(self.BASE, self.commit_everything(), tag="v0.1.1"),
                            "adds or removes lines")
 
@@ -573,12 +581,21 @@ class SecondReview(CheckCase):
         self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "changes vendor/lib")
 
     def test_a_nul_byte_in_the_version_file(self):
+        # TOML admits no NUL byte, so in pyproject.toml reading the version refuses
+        # it first; the lockfile, which that reading does not parse, meets the NUL rule
         r, base = self.build()
+        m = r.g("rev-parse", "HEAD")
         r.set_version(r.releaser, "0.1.2.dev0")
         text = (r.releaser / "pyproject.toml").read_bytes()
         (r.releaser / "pyproject.toml").write_bytes(text.replace(b'"0.1.2.dev0"', b'"0.1.2.dev0"\x00'))
         r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
-        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "a NUL byte")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "cannot be parsed")
+        r.g("switch", "-q", "-c", "nul-in-the-lockfile", m)
+        r.set_version(r.releaser, "0.1.2.dev0")
+        text = (r.releaser / "uv.lock").read_bytes()
+        (r.releaser / "uv.lock").write_bytes(text.replace(b'"0.1.2.dev0"', b'"0.1.2.dev0"\x00'))
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "uv.lock: a NUL byte in the file")
 
     def test_a_numeric_line_changed_to_an_equal_number(self):
         r, base = self.build(pyproject_head="[tool.x]\nlevels = [\n  1,\n  3\n]\n\n")
@@ -617,12 +634,25 @@ class SecondReview(CheckCase):
         self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1", env={"LC_ALL": "en_US.UTF-8"}))
 
     def test_a_version_line_outside_the_project_table(self):
-        # a [tool] table's version before [project]: the version the guard reads
-        # is not the project's, and a change to it is not the open cycle
-        r, base = self.build(pyproject_head='[tool.x]\nversion = "0.0.9"\n\n')
+        # a [tool] table's version before [project], standing at the release's
+        # version: a change to it is not the open cycle, whether with the project's
+        # own (the owner rule) or instead of it (the project's version unchanged)
+        r, base = self.build(pyproject_head='[tool.x]\nversion = "0.1.1"\n\n')
+        m = r.g("rev-parse", "HEAD")
+
+        def set_tool_x(version):
+            text = (r.releaser / "pyproject.toml").read_text()
+            (r.releaser / "pyproject.toml").write_text(text.replace('[tool.x]\nversion = "0.1.1"',
+                                                                    f'[tool.x]\nversion = "{version}"'))
         r.set_version(r.releaser, "0.1.2.dev0")
+        set_tool_x("0.1.2.dev0")
         r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
         self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"), "is not the [project] table's version ([tool.x])")
+        r.g("switch", "-q", "-c", "tool-x-only", m)
+        set_tool_x("0.1.2.dev0")
+        r.g("commit", "-q", "-am", "chore: open 0.1.2.dev0 dev cycle")
+        self.assertOutcome(FAIL, self.check(base, "HEAD", tag="v0.1.1"),
+                           "open-cycle version 0.1.1 is not main's next-patch placeholder 0.1.2.dev0")
 
     def test_a_changelog_commit_that_changes_the_files_mode(self):
         self.sb = Sandbox()
@@ -782,12 +812,18 @@ class PickedRelease(CheckCase):
         self.assertEqual(result.returncode, FAIL, result.stdout + result.stderr)
         self.assertTrue(result.stdout.splitlines()[-1].endswith(" conflicts in: app.txt"), result.stdout)
 
-    def test_a_version_line_outside_the_project_table_is_not_the_projects(self):
-        # the fixtures' setters write the first version line, here [tool.x]'s: that
-        # line is not set to main's, so it conflicts as in the automatic merge
-        r, base = self.build("pyproject", pyproject_head='[tool.x]\nversion = "0.0.9"\n\n')
+    def test_a_version_line_outside_the_project_table_is_left_as_it_is(self):
+        # a [tool] table's version before [project], which develop has changed since
+        # the merge base: set to main's with the project's, as a rewrite of the first
+        # version line would set it, it would take main's value and undo develop's
+        def tool_x(repo):
+            text = (repo.releaser / "pyproject.toml").read_text()
+            (repo.releaser / "pyproject.toml").write_text(text.replace('version = "0.0.9"', 'version = "0.0.10"'))
+            repo.g("commit", "-q", "-am", "chore: tool.x 0.0.10 (#9)")
+        r, base = self.build("pyproject", pyproject_head='[tool.x]\nversion = "0.0.9"\n\n', after_fix=tool_x)
         m = self.merge()
-        self.assertOutcome(FAIL, self.check(base, m, tag="v0.1.2"), "conflicts in: pyproject.toml")
+        self.assertIn('[tool.x]\nversion = "0.0.10"', r.g("show", f"{m}:pyproject.toml"))
+        self.assertOutcome(PASS, self.check(base, m, tag="v0.1.2"), self.PICKED_OK.format("0.1.2"))
 
     def test_more_than_one_merge_base_is_refused(self):
         # v0.1.2 promoted from a develop that did not yet hold v0.1.1's back-merge,
@@ -908,6 +944,78 @@ class FastForwardFirstRelease(CheckCase):
         self.assertTree(self.merge_tree(base, "v0.1.1"), g("rev-parse", f"{m}^{{tree}}"))
 
 
+class ProjectVersion(CheckCase):
+    """The versions the check compares are the project's own, read as the version guard
+    reads them: [project].version in pyproject.toml, the top-level "version" in
+    package.json; a file that cannot be parsed, or holds no such version, fails."""
+
+    def build(self, kind="pyproject", **kw):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = r = ReleasedRepo(self.sb, kind, changelog=False, **kw)
+        r.g("fetch", "-q", "origin")
+        base = r.g("rev-parse", "origin/develop")
+        r.g("switch", "-q", "-c", "back-merge", base)
+        r.g("merge", "-q", "--no-ff", "origin/main", "-m", "Back-merge: main → develop")
+        return r, base, r.g("rev-parse", "HEAD")
+
+    def open_cycle(self, placeholder, spoil=None):
+        r = self.repo
+        r.set_version(r.releaser, placeholder)
+        if spoil:
+            spoil(r.releaser)
+        r.g("commit", "-q", "-am", f"chore: open {placeholder} dev cycle")
+        return r.g("rev-parse", "HEAD")
+
+    def test_another_tables_version_line_before_the_project_table(self):
+        r, base, m = self.build(pyproject_head='[tool.x]\nversion = "0.0.9"\n\n')
+        c = self.open_cycle("0.1.2.dev0")
+        self.assertIn('[tool.x]\nversion = "0.0.9"', r.g("show", f"{c}:pyproject.toml"))
+        self.assertOutcome(PASS, self.check(base, c, tag="v0.1.1"), "0.1.1 -> 0.1.2.dev0 (pyproject.toml uv.lock)")
+
+    def test_a_nested_version_before_the_top_level_one(self):
+        r, base, m = self.build("package", package_nested_version=True)
+        text = r.g("show", f"{m}:package.json")
+        self.assertLess(text.index('"version": "9.9.9"'), text.index('"version": "3.5.1"'))
+        self.assertOutcome(PASS, self.check(base, m, tag="v3.5.1"), "head version 3.5.1 equals main's")
+        # condition 4's owner rule is unchanged: it takes the last line ending in "{"
+        # before a changed version line for its owner, here the nested object's
+        self.assertOutcome(FAIL, self.check(base, self.open_cycle("3.5.2-dev0"), tag="v3.5.1"),
+                           "package.json: line 6 is not the top-level version")
+
+    def test_an_unparseable_pyproject_toml(self):
+        r, base, m = self.build()
+
+        def unterminated(wt):
+            text = (wt / "pyproject.toml").read_text()
+            (wt / "pyproject.toml").write_text(text.replace('version = "0.1.2.dev0"', 'version = "0.1.2.dev0'))
+        result = self.check(base, self.open_cycle("0.1.2.dev0", unterminated), tag="v0.1.1")
+        self.assertOutcome(FAIL, result, "cannot read the project's own version of head")
+        self.assertIn("cannot be parsed", result.stdout)
+
+    def test_an_unparseable_package_json(self):
+        r, base, m = self.build("package")
+
+        def trailing_comma(wt):
+            text = (wt / "package.json").read_text()
+            (wt / "package.json").write_text(text.replace('"private": true,', '"private": true,,'))
+        result = self.check(base, self.open_cycle("3.5.2-dev0", trailing_comma), tag="v3.5.1")
+        self.assertOutcome(FAIL, result, "cannot read the project's own version of head")
+        self.assertIn("cannot be parsed", result.stdout)
+
+    def test_a_python3_without_tomllib_reads_through_uv(self):
+        # a Mac's /usr/bin/python3 is 3.9, without tomllib; a pyproject.toml
+        # repository requires uv, which provides a Python 3.11 or later
+        r, base, m = self.build()
+        shadow = self.sb.tmp / "no-tomllib"
+        shadow.mkdir()
+        (shadow / "tomllib.py").write_text("raise ImportError('no tomllib in this Python')\n")
+        log = self.sb.tmp / "uv-run.log"
+        env = {"PYTHONPATH": str(shadow), "FAKE_UV_RUN_LOG": str(log)}
+        self.assertOutcome(PASS, self.check(base, self.open_cycle("0.1.2.dev0"), tag="v0.1.1", env=env))
+        self.assertIn("run --no-project --quiet --python >=3.11\n", log.read_text())
+
+
 class CopiesAgree(unittest.TestCase):
     """back-merge-check copies _sot.sh's reading at a commit rather than sourcing it
     (a pin's floor rises only with the pinned script's own file); the copies must agree.
@@ -930,6 +1038,9 @@ class CopiesAgree(unittest.TestCase):
         ours, theirs = self.reading_lines("back-merge-check"), self.reading_lines("_sot.sh")
         self.assertEqual(len(ours), 6)
         self.assertEqual(ours, theirs)
+        reader = self.function("back-merge-check", "sot_version_reader")
+        self.assertIn("import tomllib", reader)
+        self.assertEqual(reader, self.function("_sot.sh", "sot_version_reader"))
 
     def test_the_rule_for_a_release_picked_onto_main(self):
         ours = self.function("back-merge-check", "release_promotion")
