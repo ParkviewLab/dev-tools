@@ -35,7 +35,12 @@
 #             none it exits 1, its last line giving the reason, which for a
 #             conflict ends " conflicts in: " and the paths; on an error, as
 #             below, it exits 2. git back-merge builds the merge of a release
-#             picked onto main from it.
+#             picked onto main from it, and takes from the reason what it
+#             prescribes: for a version other than the release flow's, the
+#             version the reason names as develop's due, R's next-patch
+#             placeholder, or the merge base's own where that is not a release,
+#             which decision 6 (a)'s repair restores; for a conflict or several
+#             merge bases, the exception ruled on 2026-09-27.
 #
 # `git back-merge` runs this on its own branch before it pushes, and, in a
 # repository that has switched to merge commits, the version guard runs it in its
