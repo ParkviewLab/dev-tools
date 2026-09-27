@@ -894,9 +894,9 @@ class PickedRelease(CheckCase):
 
 
 class PromotionRelease(CheckCase):
-    """A release made by promotion keeps the automatic merge alone (decision 6 (a)):
-    a version change that reached develop during the release is refused in tag mode
-    too, however the merge resolves it, and --merge-tree gives no tree for it."""
+    """A release made by promotion keeps the automatic merge alone (the version-line
+    repair): a version change that reached develop during the release is refused in
+    tag mode too, however the merge resolves it, and --merge-tree gives no tree for it."""
 
     def test_a_version_change_during_the_release_is_refused_in_tag_mode(self):
         self.sb = Sandbox()
@@ -960,9 +960,9 @@ class PromotionSearch(CheckCase):
         return g("rev-parse", "HEAD")
 
     def test_a_promotion_not_yet_back_merged_is_seen_through_a_hotfix(self):
-        # v0.1.1 is promoted and develop's version changes during it, which decision 6
-        # (a) refuses; before its back-merge lands, v0.1.2 is picked onto main. The
-        # back-merge of v0.1.2 brings v0.1.1's promotion too
+        # v0.1.1 is promoted and develop's version changes during it, which the
+        # version-line repair refuses; before its back-merge lands, v0.1.2 is picked
+        # onto main. The back-merge of v0.1.2 brings v0.1.1's promotion too
         self.sb = Sandbox()
         self.addCleanup(self.sb.cleanup)
         self.repo = r = ReleasedRepo(self.sb, "pyproject")

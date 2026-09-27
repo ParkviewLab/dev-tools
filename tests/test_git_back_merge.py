@@ -63,11 +63,13 @@ RELEASES_MD_LAST_STEP = RELEASES_MD_PR_SECTION.replace(
 
 
 def exception(version: str) -> str:
-    """The exception ruled on 2026-09-27 with its procedure, one text wherever a refusal of
+    """The exception, the direct back-merge (the handbook's releases.md, "The release's last
+    step: the back-merge pull request"), with its procedure, one text wherever a refusal of
     git back-merge names it: the owner ruled on 2026-09-26 that a refusal states its full
     repair. version is main's release version, to which the version lines are resolved."""
-    return ("Nothing is pushed. Its back-merge is the exception ruled on 2026-09-27, the direct back-merge:"
-            " in the develop worktree, bring main and develop up to date and run git merge --no-ff main;"
+    return ("Nothing is pushed. Its back-merge is the exception, the direct back-merge (the handbook's"
+            " releases.md, \"The release's last step: the back-merge pull request\"): in the develop"
+            " worktree, bring main and develop up to date and run git merge --no-ff main;"
             f" resolve the version lines to main's release version, {version}, and every other conflict by"
             " hand; commit the merge; then, in a code repository, run git dev-release --open --direct, which"
             " writes the next placeholder and pushes both commits in one push, or, in a VERSION.txt repository,"
@@ -461,7 +463,7 @@ class Conflicts(BackMergeCase):
         r.g("commit", "-q", "-am", "chore: dev build v0.1.1.dev1")
         r.g("push", "-q", "origin", "develop")
         result = self.back_merge()
-        self.assertRefused(result, "decision 6 (a)")
+        self.assertRefused(result, "the version-line repair")
         self.assertIn("0.1.1.dev1", result.stderr)
         self.assertIn("a version change reached develop outside the release flow", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
@@ -485,8 +487,9 @@ class Conflicts(BackMergeCase):
         result = self.back_merge()
         self.assertRefused(result, "origin/develop's version is 0.1.1, but develop was promoted at 0.1.1.dev0:"
                                    " a version change reached develop outside the release flow, whether or not"
-                                   " the merge would conflict. Repair it (decision 6 (a) of the real-merges"
-                                   " design): one reviewed commit restoring develop's version lines (the version"
+                                   " the merge would conflict. Repair it (the version-line repair; the handbook's"
+                                   " releases.md, \"The release's last step: the back-merge pull request\"): one"
+                                   " reviewed commit restoring develop's version lines (the version"
                                    " file and its lockfile) to 0.1.1.dev0, pushed to develop directly")
         self.assertNotIn("would conflict on", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
@@ -498,7 +501,7 @@ class Conflicts(BackMergeCase):
                              "docs: edit the changelog during the release (#4)")
         result = self.back_merge()
         self.assertRefused(result, "conflicts in: CHANGELOG.md")
-        self.assertIn("decision 6 (d)", result.stderr)
+        self.assertIn("the pull request that reconciles a conflict", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertNoResidue()
 
@@ -720,7 +723,8 @@ class PickedReleases(BackMergeCase):
         self.assertOk(result)
         self.assertIn(f"{r.tag3} is a release picked onto main", result.stdout)
         self.assertIn(self.PICKED, result.stdout)
-        self.assertNotIn("decision 6", self.out(result))
+        self.assertNotIn("the version-line repair", self.out(result))
+        self.assertNotIn("the pull request that reconciles a conflict", self.out(result))
         tip = self.origin("rev-parse", "develop")
         self.assertTrue(self.is_ancestor(r.tag3_commit, tip))
         head = self.origin("rev-parse", tip + "^2")
@@ -771,13 +775,14 @@ class PickedReleases(BackMergeCase):
         self.assertPicked(r, self.back_merge(), None)
 
     def assertTheException(self, result):
-        """Refused, prescribing the exception ruled on 2026-09-27, with its procedure, for a
-        hotfix's conflict: decision 6 (d)'s repair would bring develop's newer work on those
-        lines back to the hotfix's, and whether the conflict lies on a version line is not
-        known."""
+        """Refused, prescribing the exception, the direct back-merge (the handbook's
+        releases.md, "The release's last step: the back-merge pull request"), with its
+        procedure, for a hotfix's conflict: the pull request that reconciles a conflict
+        would bring develop's newer work on those lines back to the hotfix's, and whether
+        the conflict lies on a version line is not known."""
         self.assertRefused(result, exception(self.repo.v3))
-        self.assertNotIn("Repair it (decision 6 (d)", result.stderr)
-        self.assertNotIn("decision 6 (a)", result.stderr)
+        self.assertNotIn("Repair it (the pull request that reconciles a conflict", result.stderr)
+        self.assertNotIn("the version-line repair", result.stderr)
         self.assertNotIn("lies elsewhere", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertEqual(self.sb.gh_state()["prs"], [])
@@ -812,7 +817,7 @@ class PickedReleases(BackMergeCase):
 
     def test_a_shallow_clone_is_refused_before_anything_is_compared(self):
         # at depth 4, step 7 read a shortened first-parent line of main and prescribed a
-        # wrong decision 6 (a) repair; the command now refuses a shallow repository at
+        # wrong version-line repair; the command now refuses a shallow repository at
         # step 1, as back-merge-check does
         r = self.make_picked("pyproject")
         shallow = self.sb.tmp / "shallow"
@@ -823,7 +828,8 @@ class PickedReleases(BackMergeCase):
         self.assertRefused(result, "shallow repository")
         self.assertIn("fetch the full history", result.stderr)
         self.assertNotIn("== 2.", result.stdout)
-        self.assertNotIn("decision 6", result.stderr)
+        self.assertNotIn("the version-line repair", result.stderr)
+        self.assertNotIn("the pull request that reconciles a conflict", result.stderr)
 
     def test_an_error_of_the_check_is_reported_with_no_repair(self):
         # a git before 2.40 has no merge-tree --merge-base, so back-merge-check
@@ -833,7 +839,8 @@ class PickedReleases(BackMergeCase):
         self.assertRefused(result, "back-merge-check --merge-tree could not run (exit 2)")
         self.assertIn("git 2.40 or later", result.stderr)
         self.assertNotIn("the direct back-merge", result.stderr)
-        self.assertNotIn("decision 6", result.stderr)
+        self.assertNotIn("the version-line repair", result.stderr)
+        self.assertNotIn("the pull request that reconciles a conflict", result.stderr)
         self.assertNoResidue()
 
     def test_a_conflict_in_a_version_txt_repository_is_refused_with_the_exception(self):
@@ -853,7 +860,8 @@ class PickedReleases(BackMergeCase):
         self.sb.set_gh_state(r.gh_state())
         result = self.back_merge()
         self.assertRefused(result, "2 merge bases")
-        self.assertNotIn("decision 6", result.stderr)
+        self.assertNotIn("the version-line repair", result.stderr)
+        self.assertNotIn("the pull request that reconciles a conflict", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertNoResidue()
 
@@ -899,7 +907,7 @@ class PickedReleases(BackMergeCase):
     def test_a_promotion_not_yet_back_merged_is_seen_through_a_hotfix(self):
         # v0.1.1 is promoted and develop's version changes during it; before its
         # back-merge lands, v0.1.2 is picked onto main. Its back-merge brings v0.1.1's
-        # promotion too, so step 7 refuses the version change, decision 6 (a)
+        # promotion too, so step 7 refuses the version change, the version-line repair
         r = self.make("pyproject")
         r.g("fetch", "-q", "origin")
         r.g("merge", "-q", "--ff-only", "origin/develop")
@@ -910,7 +918,7 @@ class PickedReleases(BackMergeCase):
         self.sb.set_gh_state(r.gh_state())
         result = self.back_merge()
         self.assertRefused(result, "origin/develop's version is 0.1.1.dev1, but develop was promoted at 0.1.1.dev0")
-        self.assertIn("decision 6 (a)", result.stderr)
+        self.assertIn("the version-line repair", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertNoResidue()
 
@@ -921,24 +929,26 @@ class PickedReleases(BackMergeCase):
         r = self.make("pyproject", first_release_by_fast_forward=True, early_merge=True)
         result = self.back_merge()
         self.assertOk(result)
-        self.assertNotIn("decision 6", self.out(result))
+        self.assertNotIn("the version-line repair", self.out(result))
+        self.assertNotIn("the pull request that reconciles a conflict", self.out(result))
         self.assertEqual(r.version_at("develop", cwd=r.origin), "0.1.2.dev0")
         self.assertNoResidue()
 
     def repair_6a(self, version):
-        """Decision 6 (a)'s repair, carried out: one commit restoring develop's version
+        """The version-line repair, carried out: one commit restoring develop's version
         lines (the version file and its lockfile) to version, pushed to develop directly."""
         r = self.repo
         r.g("fetch", "-q", "origin")
         r.g("switch", "-q", "develop")
         r.g("merge", "-q", "--ff-only", "origin/develop")
         r.set_version(r.releaser, version)
-        r.g("commit", "-q", "-am", f"chore: restore develop's version to {version} (decision 6 (a))")
+        r.g("commit", "-q", "-am", f"chore: restore develop's version to {version} (the version-line repair)")
         r.g("push", "-q", "origin", "develop")
 
     def assertRepair6a(self, result, version):
-        """Refused with decision 6 (a)'s repair, naming the version to restore, not the exception."""
-        self.assertRefused(result, "Repair it (decision 6 (a) of the real-merges design): one reviewed commit"
+        """Refused with the version-line repair, naming the version to restore, not the exception."""
+        self.assertRefused(result, "Repair it (the version-line repair; the handbook's releases.md, \"The"
+                                   " release's last step: the back-merge pull request\"): one reviewed commit"
                                    f" restoring develop's version lines (the version file and its lockfile) to {version},"
                                    " pushed to develop directly (with enforce_admins switched off and on again where"
                                    " administrators are bound); then run git back-merge again.")
@@ -1077,14 +1087,15 @@ class SeveralMergeBases(BackMergeCase):
         self.assertRefused(result, self.EXCEPTION)
         self.assertIn("v0.1.2 is a release picked onto main", result.stdout)
         self.assertIn("2 merge bases", result.stderr)
-        self.assertNotIn("decision 6", result.stderr)
+        self.assertNotIn("the version-line repair", result.stderr)
+        self.assertNotIn("the pull request that reconciles a conflict", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertNoResidue()
 
     def test_a_promotion_whose_version_changed_is_refused_with_the_exception(self):
         # v0.1.2 promoted from develop's F, before v0.1.1's back-merge moved develop to
         # 0.1.2.dev0: step 7 compares F's 0.1.1.dev0 with it, and restoring develop's
-        # version, decision 6 (a)'s repair, would be wrong
+        # version, the version-line repair, would be wrong
         r = self.make("pyproject")
         r.g("fetch", "-q", "origin")
         feature_f = r.g("rev-parse", "origin/develop")
@@ -1095,7 +1106,8 @@ class SeveralMergeBases(BackMergeCase):
         self.assertRefused(result, self.EXCEPTION)
         self.assertIn("origin/develop's version is 0.1.2.dev0, but develop was promoted at 0.1.1.dev0", result.stderr)
         self.assertIn("2 merge bases", result.stderr)
-        self.assertNotIn("decision 6", result.stderr)
+        self.assertNotIn("the version-line repair", result.stderr)
+        self.assertNotIn("the pull request that reconciles a conflict", result.stderr)
         self.assertEqual(self.origin("branch", "--list", "back-merge-*"), "")
         self.assertNoResidue()
 

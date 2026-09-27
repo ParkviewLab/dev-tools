@@ -223,7 +223,8 @@ class AfterTheSwitch(DevReleaseCase):
 
 
 class TheException(DevReleaseCase):
-    """--open --direct after the exception ruled on 2026-09-27, the direct back-merge with
+    """--open --direct after the exception, the direct back-merge (the handbook's
+    releases.md, "The release's last step: the back-merge pull request"), with
     administrators unbound for its one push: in a repository that allows merge commits
     it opens the cycle by a direct push, as --open does before the switch, and that one
     push carries the hand-made merge commit as well. It refuses a develop that does not
@@ -292,7 +293,8 @@ class TheException(DevReleaseCase):
             self.assertEqual(res.returncode, 1, self.out(res))
             self.assertIn(f"git dev-release: the local develop's version is {found}, not {expected}, the version"
                           f" of main's newest release (v{expected}): --direct opens the cycle only after the direct"
-                          " back-merge of the exception ruled on 2026-09-27, whose merge leaves develop at that"
+                          " back-merge of the exception (the handbook's releases.md, \"The release's last step:"
+                          " the back-merge pull request\"), whose merge leaves develop at that"
                           " version once its version lines are resolved to main's. Nothing is committed or pushed.",
                           res.stderr)
             self.assertNotIn("new:", res.stdout)
@@ -322,8 +324,9 @@ class TheException(DevReleaseCase):
             self.assertEqual(res.returncode, 1, self.out(res))
             self.assertIn("git dev-release: the local develop's version is 0.1.2, the version of main's newest release"
                           f" (v0.1.2), but it does not hold that release's commit ({short}): the exception's merge is"
-                          " missing. --direct opens the cycle only after the direct back-merge of the exception ruled"
-                          " on 2026-09-27, whose merge of main brings that commit into develop. Nothing is committed"
+                          " missing. --direct opens the cycle only after the direct back-merge of the exception (the"
+                          " handbook's releases.md, \"The release's last step: the back-merge pull request\"),"
+                          " whose merge of main brings that commit into develop. Nothing is committed"
                           " or pushed.", res.stderr)
             self.assertNotIn("new:", res.stdout)
         self.assertEqual(self.sb.git(r.dev, "rev-parse", "HEAD"), head)
@@ -362,7 +365,8 @@ class TheException(DevReleaseCase):
         self.assertEqual(res.returncode, 1, self.out(res))
         self.assertIn("git dev-release: origin/main holds no release tag vX.Y.Z, so the local develop cannot carry"
                       " the version of main's newest release: --direct opens the cycle only after the direct"
-                      " back-merge of the exception ruled on 2026-09-27. Nothing is committed or pushed.", res.stderr)
+                      " back-merge of the exception (the handbook's releases.md, \"The release's last step: the"
+                      " back-merge pull request\"). Nothing is committed or pushed.", res.stderr)
         self.assertEqual(self.sb.git(r.dev, "rev-parse", "HEAD"), merge)
         self.assertDevelopUnchanged()
 
