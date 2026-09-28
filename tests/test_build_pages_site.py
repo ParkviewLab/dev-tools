@@ -157,6 +157,14 @@ class ScanTests(Fixture):
         self.assertEqual(str(listed["plan.html"].twin.rel), "plan.md")
         self.assertIsNone(listed["other.md"].twin)
 
+    def test_brand_prefix_left_out_of_an_html_title(self) -> None:
+        self.html("docs/northstar.html", "ParkviewLab &middot; paper-boxing northstar")
+        self.html("docs/study.html", "PensaGrex &mdash; tree grammar study")
+        folder, untitled = self.scan()
+        self.assertEqual(untitled, [])
+        titles = {str(d.rel): d.title for d in folder.documents}
+        self.assertEqual(titles, {"northstar.html": "paper-boxing northstar", "study.html": "PensaGrex — tree grammar study"})
+
     def test_untitled_documents_are_collected(self) -> None:
         self.write("docs/blank.md", "no heading here\n")
         self.write("docs/blank.html", "<html><head></head><body></body></html>")
@@ -202,6 +210,13 @@ class TitleTests(Fixture):
     def test_html_title_and_description(self) -> None:
         path = self.html("docs/a.html", "A &amp; B\n  &mdash; C", "What  it\nis")
         self.assertEqual(bps.html_head(path), ("A & B — C", "What it is"))
+
+    def test_index_title(self) -> None:
+        self.assertEqual(bps.index_title("ParkviewLab · engineering northstar"), "engineering northstar")
+        self.assertEqual(bps.index_title("ParkviewLab"), "ParkviewLab")
+        self.assertEqual(bps.index_title("ParkviewLab ·"), "ParkviewLab ·")
+        self.assertEqual(bps.index_title("jonobones · northstar"), "jonobones · northstar")
+        self.assertEqual(bps.index_title("The ParkviewLab · brand"), "The ParkviewLab · brand")
 
     def test_html_without_description(self) -> None:
         path = self.html("docs/a.html", "Only")
