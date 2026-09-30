@@ -171,8 +171,9 @@ handbook_dir() {
 }
 # The handbook's releases.md gives the release's end for a repository that has not
 # switched in the section headed "Until a repository has switched"; its heading is
-# the contract between the two repositories. Until that section is released, the
-# section as handbook v0.27.0 released it gives the direct back-merge; it is found
+# the contract between the two repositories. In a handbook worktree older than
+# v1.0.0, the first release with that section, the section as handbook v0.27.0
+# released it gives the direct back-merge instead; it is found
 # by that heading exactly, and quoted only while it still gives it. It quotes no
 # other section, such as the one on the back-merge pull request, whose text names
 # `merge --no-ff` as well.

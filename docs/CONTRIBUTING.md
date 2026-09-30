@@ -16,7 +16,7 @@ This repo follows the ParkviewLab conventions; the authoritative, org-wide versi
 
 ## Commit / PR-title convention (this is what the release notes read)
 
-A PR is merged with a merge commit titled `<PR title> (#N)`, so the PR title becomes the commit subject. A release publishes a GitHub Release whose notes GitHub generates from the merged pull requests, grouped by their titles; `.github/release.yml` leaves the back-merge pull requests out, and this repository keeps no `CHANGELOG.md`. Prefix every PR title with a [Conventional Commit](https://www.conventionalcommits.org/) type (`feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `test:`, `revert:`, or `chore:` / `ci:` / `build:` / `style:` for maintenance), with a `!` after the type for a breaking change.
+A PR is merged with a merge commit titled `<PR title> (#N)`, so the PR title becomes the commit subject. A release publishes a GitHub Release whose notes GitHub generates from the merged pull requests, one line for each, with its title and link; `.github/release.yml` leaves the back-merge pull requests out, and this repository keeps no `CHANGELOG.md`. Prefix every PR title with a [Conventional Commit](https://www.conventionalcommits.org/) type (`feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `test:`, `revert:`, or `chore:` / `ci:` / `build:` / `style:` for maintenance), with a `!` after the type for a breaking change.
 
 ## Local checks before opening a PR
 
@@ -35,8 +35,8 @@ The version lives in `VERSION.txt` only; never hard-code it elsewhere, and never
 
 ## Changes to the scripts that workflows run
 
-Three scripts run inside other repositories' workflows, each from a checkout of this repository at an exact release: `back-merge-check` (the version guard), `generate-changelog` (the release's changelog job) and `build-pages-site` (the documentation site). A change to one of them reaches a repository only when that repository's pin moves: the version guard's and the changelog job's pins follow the floor policy in the handbook's `ci.md` ("Shared dev scripts"), and the documentation site's pin is bumped deliberately (`docs-site.md`). So a release that changes one of these scripts raises its floor, and its release notes should say what changed for the repositories that pin it.
+Three scripts run inside other repositories' workflows, each from a checkout of this repository at an exact release: `back-merge-check` (the version guard), `generate-changelog` (the release's changelog job) and `build-pages-site` (the documentation site). A change to one of them reaches a repository only when that repository's pin moves: the version guard's and the changelog job's pins follow the floor policy in the handbook's `ci.md` ("Shared dev scripts"), and the documentation site's pin is bumped deliberately (`docs-site.md`). So a release that changes `back-merge-check` or `generate-changelog` raises that script's floor, and a release that changes any of the three should say in its notes what changed for the repositories that pin it.
 
 ## AI contributors
 
-Follow the behavioural contract in the handbook's `ai-collaboration.md` (notably: merging, tagging and releasing need an explicit, per-release go-ahead).
+Follow the behavioural contract in the handbook's `ai-collaboration.md` (notably: merging a feature pull request is the user's action, and tagging and releasing need an explicit, per-release go-ahead).
