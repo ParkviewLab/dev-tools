@@ -811,8 +811,10 @@ class PickedReleases(BackMergeCase):
             repo.g("commit", "-q", "-am", "build: an unterminated string (#9)")
         self.make_picked("pyproject", after_fix=break_pyproject)
         result = self.back_merge()
-        self.assertRefused(result, "Repair it: fix develop's version file by an ordinary pull request into develop,"
-                           " then run git back-merge again.")
+        self.assertRefused(result, "Repair it: by an ordinary pull request into develop, make develop's version"
+                           " readable again, set to the next-patch placeholder of the release at the merge base,"
+                           " which the version guard passes as the repair of develop's version file; then run"
+                           " git back-merge again.")
         self.assertIn("back-merge-check accepts no merge of origin/main into origin/develop for v0.1.2: for a release"
                       " picked onto main, develop's version cannot be read", result.stderr)
         self.assertNotIn(exception(self.repo.v3), result.stderr)

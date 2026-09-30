@@ -463,11 +463,12 @@ picked_merge() {  # 8, for a release picked onto main: prints the merge commit M
         # ruled the exception.
         refuse_exception "the merge of origin/main into origin/develop conflicts in: ${reason##*" conflicts in: "}. $TAG is a release picked onto main, a hotfix, whose conflict the pull request that reconciles a conflict would settle by undoing develop's newer work on those lines" ;;
       *"develop's version cannot be read"*)
-        # develop's own version file cannot be parsed: the repair is develop's own, an
-        # ordinary pull request that fixes the file, after which the check can give the
-        # merge; the back-merge stays inside the checked pull request, and the
-        # exception is not needed
-        die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason. Nothing is pushed. Repair it: fix develop's version file by an ordinary pull request into develop, then run git back-merge again." ;;
+        # develop's own version cannot be read (its file cannot be parsed or holds no
+        # static version): the repair is develop's own, an ordinary pull request that
+        # makes it readable, which the version guard passes as a repair, after which
+        # the check can give the merge; the back-merge stays inside the checked pull
+        # request, and the exception is not needed
+        die "back-merge-check accepts no merge of origin/main into origin/develop for $TAG: $reason. Nothing is pushed. Repair it: by an ordinary pull request into develop, make develop's version readable again, set to the next-patch placeholder of the release at the merge base, which the version guard passes as the repair of develop's version file; then run git back-merge again." ;;
       *)
         # a reason none of the above covers (the merge base's version file, or main's
         # project name, cannot be read)
