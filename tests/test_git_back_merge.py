@@ -800,10 +800,10 @@ class PickedReleases(BackMergeCase):
         self.assertIn("conflicts in: app.txt", result.stderr)
         self.assertTheException(result)
 
-    def test_a_reason_no_named_refusal_covers_is_refused_with_the_exception(self):
-        # develop's version file cannot be parsed: the check gives no merge, for a reason
-        # that none of the refusals the command names covers, and the command prescribes
-        # the exception, with the same text
+    def test_an_unreadable_version_on_develop_is_repaired_by_a_pull_request(self):
+        # develop's version file cannot be parsed: the check gives no merge, and the
+        # repair is develop's own, an ordinary pull request that fixes the file, then
+        # git back-merge again; the exception is not prescribed
         def break_pyproject(repo):
             text = (repo.releaser / "pyproject.toml").read_text()
             (repo.releaser / "pyproject.toml").write_text(
@@ -811,9 +811,12 @@ class PickedReleases(BackMergeCase):
             repo.g("commit", "-q", "-am", "build: an unterminated string (#9)")
         self.make_picked("pyproject", after_fix=break_pyproject)
         result = self.back_merge()
+        self.assertRefused(result, "Repair it: fix develop's version file by an ordinary pull request into develop,"
+                           " then run git back-merge again.")
         self.assertIn("back-merge-check accepts no merge of origin/main into origin/develop for v0.1.2: for a release"
                       " picked onto main, develop's version cannot be read", result.stderr)
-        self.assertTheException(result)
+        self.assertNotIn(exception(self.repo.v3), result.stderr)
+        self.assertNotIn("the version-line repair", result.stderr)
 
     def test_a_shallow_clone_is_refused_before_anything_is_compared(self):
         # at depth 4, step 7 read a shortened first-parent line of main and prescribed a
