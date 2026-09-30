@@ -10,7 +10,9 @@ name: Version guard
 # reads them; in Cargo.toml, which back-merge-check does not read,
 # [package].version (or [workspace.package].version, in a workspace); and
 # VERSION.txt whole. A version file the base branch does not yet have is new, not
-# bumped, and passes.
+# bumped, and passes. Where the base's version cannot be read, because its file
+# cannot be parsed or holds no static version, a pull request that makes it
+# readable is the repair of the base's version file, and passes.
 #
 # Back-merge mode, for a pull request from this repository (never a fork) whose
 # branch is `back-merge-vX.Y.Z`: the release comes back into `develop` through that
@@ -97,7 +99,13 @@ jobs:
               echo "::error::$1 cannot be parsed, so its version cannot be compared with origin/$BASE's."; fail=1; return 0
             fi
             if ! old=$(project_version "$1" "$base_copy"); then
-              echo "::error::origin/$BASE's $1 cannot be parsed, so the version cannot be compared."; fail=1; return 0
+              if [ -n "$new" ]; then
+                echo "origin/$BASE's $1 cannot be parsed, and this PR makes its version readable ($new): the repair of $BASE's version file, not a bump."; return 0
+              fi
+              echo "::error::origin/$BASE's $1 cannot be parsed, and this PR leaves its version unreadable."; fail=1; return 0
+            fi
+            if [ -z "$old" ] && [ -n "$new" ]; then
+              echo "origin/$BASE's $1 holds no static version, and this PR gives it one ($new): the repair of $BASE's version file, not a bump."; return 0
             fi
             if [ -z "$new" ] && [ -z "$old" ]; then
               echo "$1 holds no static version of the project's own, here or at origin/$BASE: nothing to guard."; return 0
