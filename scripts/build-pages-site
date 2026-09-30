@@ -17,7 +17,8 @@ into DIR, a new or empty directory:
                     lives under site/, are not copied; a shell under docs/ is
                     refused, since it would be published as a document)
     docs/           docs/, byte-identical to the repository, plus a generated
-                    index.html in any subfolder that holds documents
+                    index.html in any subfolder that holds documents (a folder
+                    that ships its own index.html keeps it)
 
 Only docs/ and site/ are read. Anything else at the repository root, such as a
 checkout of dev-tools in a subfolder, is ignored; site/ is optional, as is the
@@ -25,12 +26,14 @@ introduction, and a repository with neither publishes its docs/ alone.
 
 The release tag is --tag if given, else the newest v* tag reachable from HEAD
 (git describe --tags --abbrev=0 --match 'v[0-9]*'); either way it must be a
-vX.Y.Z release tag, so a vnext is refused. A tag reachable from HEAD may be
+vX.Y.Z release tag, optionally with a pre-release or build suffix (v1.2.3-rc.1),
+so a vnext is refused. A tag reachable from HEAD may be
 the previous release's rather than this one's: a run that starts before the tag
 lands stamps the previous release and publishes, and a manual re-run on the
 changelog commit that follows a release still builds. A repository with no v*
-tag at all fails the build. Every GitHub link the build emits is pinned to that
-tag, and the repository is read off the origin remote (GITHUB_REPOSITORY when
+tag at all fails the build. Every link the build emits to the repository's files
+on GitHub is pinned to that tag (the footer's link to the repository itself is
+not), and the repository is read off the origin remote (GITHUB_REPOSITORY when
 there is no remote to read). --repo must be the root of its git checkout when
 it is inside one, so a subdirectory never borrows the enclosing checkout's
 remote.
@@ -98,7 +101,7 @@ Exit codes:
   1  build failure (no tag, no docs/, an untitled or unreadable document, a
      placeholder surviving the stamp, an unresolved reference, an unusable
      --out, --shell or --repo, a folder index not spelt index.html, no
-     repository to link to)
+     repository to link to, a --tag that is not vX.Y.Z)
   2  bad arguments
 """
 
@@ -326,7 +329,7 @@ def normalise_ws(text: str) -> str:
     return " ".join(text.split())
 
 
-# The brand before an HTML twin's own title, which the scaffold's <title> carries
+# The brand before an HTML document's own title, which the scaffold's <title> carries
 # for the browser tab; the index lists the title without it, so that branded and
 # unbranded titles read alike.
 BRAND_PREFIX = "ParkviewLab · "
