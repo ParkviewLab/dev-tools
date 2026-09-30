@@ -161,7 +161,7 @@ elif [[ "$allowed" == true ]]; then
   if [[ "$OPEN" == 1 ]]; then
     echo "git dev-release: $slug allows merge commits, so develop takes no direct push: the open cycle arrives as the second commit of the back-merge pull request. After a release, run git back-merge. Where its back-merge is the exception (the handbook's releases.md, \"The release's last step: the back-merge pull request\"), the direct back-merge with administrators unbound for its one push, open the cycle after its merge with git dev-release --open --direct." >&2
   else
-    echo "git dev-release: $slug allows merge commits, so develop takes no direct push, and its dev-release.yml on origin/develop declares no kind input: re-assemble it from the dev-release parts of the handbook's ci.md, \"dev-release.yml — on-demand dev build\", and run git dev-release again." >&2
+    echo "git dev-release: $slug allows merge commits, so develop takes no direct push, and its dev-release.yml on origin/develop declares no kind input: re-assemble it from the dev-release parts of the handbook's ci.md, \"dev-release.yml: on-demand dev build\", and run git dev-release again." >&2
   fi
   exit 1
 fi
